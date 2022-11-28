@@ -1,0 +1,77 @@
+
+program = {
+    SOI ~
+    NEWLINE* ~
+    expr ~
+    (NEWLINE+ ~ expr)* ~
+    NEWLINE*
+}
+
+expr = {
+	assn
+}
+
+assn = {
+	(ident ~ "=")? ~ bool_expr
+}
+
+bool_expr = {
+	term ~ (bool_op ~ term)*
+}
+bool_op = { "and" | "or" }
+term = {
+	factor ~ (term_op ~ factor)*
+}
+term_op = { "+" | "-" }
+factor = {
+	call ~ (factor_op ~ call)*
+}
+factor_op = { "*" | "/" }
+
+call = {
+    ident ~ arg_list |
+    primary
+}
+
+arg_list = {
+	"(" ~ ")" |
+    "(" ~ expr ~ ("," ~ expr)* ~ ","? ~ ")"
+}
+
+primary = {
+    number |
+    string |
+    boolean |
+    nil |
+    reference
+}
+
+reference = {
+	!KEYWORD ~ ident
+}
+
+boolean = { "true" | "false" }
+
+nil = { "nil" }
+
+ident = @{
+	XID_START ~ XID_CONTINUE*
+}
+number = @{
+	"-"? ~
+	integer ~
+    ("." ~ mantissa)?
+}
+integer = { ASCII_NONZERO_DIGIT ~ ASCII_DIGIT+ | ASCII_DIGIT }
+mantissa = { ASCII_DIGIT+ }
+
+string = @{
+	"\"" ~ (!"\"" ~ ANY)* ~ "\""
+}
+
+KEYWORD = {
+	"do" | "end" | "if" | "else" | "def" | "macro" |
+    "class" | "or" | "and"
+}
+WHITESPACE = _{ " " }
+COMMENT = _{ "#" ~ (!NEWLINE ~ ANY)* }
