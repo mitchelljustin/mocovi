@@ -35,7 +35,7 @@ pub enum SyntaxNode {
     Return { retval: Box<SyntaxNode> },
 
     // expressions
-    BinaryExpr { lhs: Box<SyntaxNode>, op: Operator, rhs: Box<SyntaxNode> },
+    BinaryExpr { lhs: Box<SyntaxNode>, operator: Operator, rhs: Box<SyntaxNode> },
     Call { callee: String, args: Vec<SyntaxNode> },
 
     // primary
@@ -132,9 +132,8 @@ impl<'a> From<Pair<'a, Rule>> for SyntaxNode {
                 let mut inner = pair.into_inner();
                 let mut expr: SyntaxNode = inner.next().unwrap().into();
                 while let (Some(operator), Some(rhs)) = (inner.next(), inner.next()) {
-                    let op = Self::parse_operator(operator);
                     expr = SyntaxNode::BinaryExpr {
-                        op,
+                        operator: operator.as_str().into(),
                         lhs: expr.into(),
                         rhs: rhs.into(),
                     }
@@ -177,9 +176,9 @@ impl<'a> From<Pair<'a, Rule>> for SyntaxNode {
     }
 }
 
-impl SyntaxNode {
-    fn parse_operator(pair: Pair<'_, Rule>) -> Operator {
-        match pair.as_str() {
+impl From<&str> for Operator {
+    fn from(value: &str) -> Self {
+        match value {
             "and" => Operator::BoolAnd,
             "or" => Operator::BoolOr,
             "==" => Operator::Equal,
@@ -193,6 +192,25 @@ impl SyntaxNode {
             "*" => Operator::Mul,
             "/" => Operator::Div,
             _ => unreachable!(),
+        }
+    }
+}
+
+impl From<Operator> for &str {
+    fn from(value: Operator) -> Self {
+        match value {
+            Operator::BoolAnd => "and",
+            Operator::BoolOr => "or",
+            Operator::Equal => "==",
+            Operator::NotEqual => "!=",
+            Operator::Less => "<",
+            Operator::Greater => ">",
+            Operator::LessOrEqual => "<=",
+            Operator::GreaterOrEqual => ">=",
+            Operator::Add => "+",
+            Operator::Sub => "-",
+            Operator::Mul => "*",
+            Operator::Div => "/",
         }
     }
 }
