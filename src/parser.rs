@@ -5,25 +5,16 @@ use pest_derive::*;
 #[grammar = "mocovi.pest"]
 pub struct MocoviParser;
 
-
-pub fn print_ast(ast: Pairs<Rule>) {
-    fn print(ast: Pairs<Rule>, indent: usize) {
-        for pair in ast {
-            let spaces = "  ".repeat(indent);
-            let rule = pair.as_rule();
-            let lexeme = pair.as_str().replace('\n', " .. ");
-            println!("{spaces}{rule:?} '{lexeme}'");
-            print(pair.into_inner(), indent + 1);
-        }
-    }
-
-    print(ast, 0);
-}
-
 #[derive(Debug, Copy, Clone)]
 pub enum Operator {
     BoolAnd,
     BoolOr,
+    Equal,
+    NotEqual,
+    Greater,
+    Less,
+    GreaterOrEqual,
+    LessOrEqual,
     Add,
     Sub,
     Mul,
@@ -32,8 +23,18 @@ pub enum Operator {
 
 #[derive(Debug, Clone)]
 pub enum SyntaxNode {
-    // compound
+    Statements { stmts: Vec<SyntaxNode> },
+
+    // compound statements
+    IfStmt { condition: Box<SyntaxNode>, then_body: Box<SyntaxNode>, else_body: Box<SyntaxNode> },
+    WhileStmt { condition: Box<SyntaxNode>, body: Box<SyntaxNode> },
+    FuncDef { name: String, params: Vec<String>, body: Box<SyntaxNode> },
+
+    // simple statements
     Assignment { target: String, value: Box<SyntaxNode> },
+    Return { retval: Box<SyntaxNode> },
+
+    // expressions
     BinaryExpr { lhs: Box<SyntaxNode>, op: Operator, rhs: Box<SyntaxNode> },
     Call { callee: String, args: Vec<SyntaxNode> },
 
@@ -45,46 +46,97 @@ pub enum SyntaxNode {
     NilLiteral,
 }
 
+fn optional_stmts(inner: &mut Pairs<'_, Rule>) -> Box<SyntaxNode> {
+    inner
+        .next()
+        .map_or_else(
+            || Box::new(SyntaxNode::Statements { stmts: Vec::new() }),
+            Into::into,
+        )
+}
+
+impl<'a> From<Pair<'a, Rule>> for Box<SyntaxNode> {
+    fn from(value: Pair<'a, Rule>) -> Self {
+        Box::new(value.into())
+    }
+}
+
 impl<'a> From<Pair<'a, Rule>> for SyntaxNode {
     fn from(pair: Pair<'a, Rule>) -> Self {
         match pair.as_rule() {
             Rule::program |
             Rule::expr |
+            Rule::grouping |
+            Rule::stmt |
+            Rule::simple_stmt |
+            Rule::compound_stmt |
             Rule::primary =>
-                SyntaxNode::from(pair.into_inner().next().unwrap()),
-            Rule::reference =>
-                SyntaxNode::Reference { name: pair.as_str().to_owned() },
-            Rule::assn => {
+                pair.into_inner().next().unwrap().into(),
+            Rule::stmts => {
+                let stmts = pair
+                    .into_inner()
+                    .filter(|stmt| stmt.as_str() != "\n")
+                    .map(SyntaxNode::from)
+                    .collect();
+                SyntaxNode::Statements { stmts }
+            }
+            Rule::if_stmt => {
                 let mut inner = pair.into_inner();
-                let target = inner.next().unwrap();
-                if let Some(value) = inner.next() {
-                    SyntaxNode::Assignment {
-                        target: target.as_str().to_owned(),
-                        value: Box::new(value.into()),
-                    }
-                } else {
-                    target.into()
+                let condition = inner.next().unwrap().into();
+                let then_body = optional_stmts(&mut inner);
+                let else_body = optional_stmts(&mut inner);
+                SyntaxNode::IfStmt {
+                    condition,
+                    then_body,
+                    else_body,
                 }
             }
+            Rule::while_stmt => {
+                let mut inner = pair.into_inner();
+                let condition = inner.next().unwrap().into();
+                let body = optional_stmts(&mut inner);
+                SyntaxNode::WhileStmt { condition, body }
+            }
+            Rule::func_def => {
+                let mut inner = pair.into_inner();
+                let name = inner.next().unwrap().as_str().to_owned();
+                let params = inner.next().unwrap().into_inner().map(|param| param.as_str().to_owned()).collect();
+                let body = optional_stmts(&mut inner);
+                SyntaxNode::FuncDef {
+                    name,
+                    params,
+                    body,
+                }
+            }
+            Rule::return_stmt => {
+                let retval = pair.into_inner().next().unwrap().into();
+                SyntaxNode::Return { retval }
+            }
+            Rule::assignment => {
+                let mut inner = pair.into_inner();
+                let expr = inner.next().unwrap();
+                if let Some(value) = inner.next() {
+                    let target = expr.as_str().to_owned();
+                    SyntaxNode::Assignment {
+                        target,
+                        value: value.into(),
+                    }
+                } else {
+                    expr.into()
+                }
+            }
+            Rule::comparison |
             Rule::bool_expr |
             Rule::term |
             Rule::factor => {
                 let mut inner = pair.into_inner();
                 let mut expr: SyntaxNode = inner.next().unwrap().into();
                 while let (Some(operator), Some(rhs)) = (inner.next(), inner.next()) {
-                    let op = match operator.as_str() {
-                        "and" => Operator::BoolAnd,
-                        "or" => Operator::BoolOr,
-                        "+" => Operator::Add,
-                        "-" => Operator::Sub,
-                        "*" => Operator::Mul,
-                        "/" => Operator::Div,
-                        _ => unreachable!(),
-                    };
+                    let op = Self::parse_operator(operator);
                     expr = SyntaxNode::BinaryExpr {
                         op,
-                        lhs: Box::new(expr),
-                        rhs: Box::new(rhs.into()),
+                        lhs: expr.into(),
+                        rhs: rhs.into(),
                     }
                 }
                 expr
@@ -117,8 +169,30 @@ impl<'a> From<Pair<'a, Rule>> for SyntaxNode {
                 };
                 SyntaxNode::BooleanLiteral { value }
             }
+            Rule::ident =>
+                SyntaxNode::Reference { name: pair.as_str().to_owned() },
             Rule::nil => SyntaxNode::NilLiteral,
             rule => unimplemented!("Rule {rule:?}"),
+        }
+    }
+}
+
+impl SyntaxNode {
+    fn parse_operator(pair: Pair<'_, Rule>) -> Operator {
+        match pair.as_str() {
+            "and" => Operator::BoolAnd,
+            "or" => Operator::BoolOr,
+            "==" => Operator::Equal,
+            "!=" => Operator::NotEqual,
+            "<" => Operator::Less,
+            ">" => Operator::Greater,
+            "<=" => Operator::LessOrEqual,
+            ">=" => Operator::GreaterOrEqual,
+            "+" => Operator::Add,
+            "-" => Operator::Sub,
+            "*" => Operator::Mul,
+            "/" => Operator::Div,
+            _ => unreachable!(),
         }
     }
 }
