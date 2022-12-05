@@ -1,3 +1,4 @@
+use std::fmt::{Display, Formatter};
 use pest::iterators::{Pair, Pairs};
 use pest_derive::*;
 
@@ -21,22 +22,43 @@ pub enum Operator {
     Div,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct Position {
+    line: usize,
+    col: usize,
+}
+
+impl Display for Position {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let Self { col, line } = self;
+        write!(f, "{line}:{col}")
+    }
+}
+
+
 #[derive(Debug, Clone)]
-pub enum SyntaxNode {
-    Statements { stmts: Vec<SyntaxNode> },
+pub struct SyntaxNode<'a> {
+    pub pair: Pair<'a, Rule>,
+    pub kind: NodeKind<'a>,
+}
+
+#[derive(Debug, Clone)]
+pub enum NodeKind<'a> {
+    // top-level statement
+    Program { body: Vec<SyntaxNode<'a>> },
 
     // compound statements
-    IfStmt { condition: Box<SyntaxNode>, then_body: Box<SyntaxNode>, else_body: Box<SyntaxNode> },
-    WhileStmt { condition: Box<SyntaxNode>, body: Box<SyntaxNode> },
-    FuncDef { name: String, params: Vec<String>, body: Box<SyntaxNode> },
+    IfStmt { condition: Box<SyntaxNode<'a>>, then_body: Vec<SyntaxNode<'a>>, else_body: Vec<SyntaxNode<'a>> },
+    WhileStmt { condition: Box<SyntaxNode<'a>>, body: Vec<SyntaxNode<'a>> },
+    FuncDef { name: String, params: Vec<String>, body: Vec<SyntaxNode<'a>> },
 
     // simple statements
-    Assignment { target: String, value: Box<SyntaxNode> },
-    Return { retval: Box<SyntaxNode> },
+    Assignment { target: String, value: Box<SyntaxNode<'a>> },
+    Return { retval: Box<SyntaxNode<'a>> },
 
     // expressions
-    BinaryExpr { lhs: Box<SyntaxNode>, operator: Operator, rhs: Box<SyntaxNode> },
-    Call { callee: String, args: Vec<SyntaxNode> },
+    BinaryExpr { lhs: Box<SyntaxNode<'a>>, operator: Operator, rhs: Box<SyntaxNode<'a>> },
+    Call { callee: String, args: Vec<SyntaxNode<'a>> },
 
     // primary
     Reference { name: String },
@@ -46,119 +68,134 @@ pub enum SyntaxNode {
     NilLiteral,
 }
 
-fn optional_stmts(inner: &mut Pairs<'_, Rule>) -> Box<SyntaxNode> {
-    inner
-        .next()
-        .map_or_else(
-            || Box::new(SyntaxNode::Statements { stmts: Vec::new() }),
-            Into::into,
-        )
-}
-
-impl<'a> From<Pair<'a, Rule>> for Box<SyntaxNode> {
-    fn from(value: Pair<'a, Rule>) -> Self {
-        Box::new(value.into())
+fn take_stmts<'a>(inner: &mut Pairs<'a, Rule>) -> Vec<SyntaxNode<'a>> {
+    match inner.next() {
+        Some(stmts) => stmts
+            .into_inner()
+            .filter(|stmt| !stmt.as_str().trim().is_empty())
+            .map(SyntaxNode::from)
+            .collect(),
+        None => Vec::new(),
     }
 }
 
-impl<'a> From<Pair<'a, Rule>> for SyntaxNode {
+impl<'a> From<Pair<'a, Rule>> for SyntaxNode<'a> {
     fn from(pair: Pair<'a, Rule>) -> Self {
-        match pair.as_rule() {
-            Rule::program |
+        let mut inner = pair.clone().into_inner();
+        let rule = pair.as_rule();
+        match rule {
             Rule::expr |
             Rule::grouping |
             Rule::stmt |
             Rule::simple_stmt |
             Rule::compound_stmt |
             Rule::primary =>
-                pair.into_inner().next().unwrap().into(),
-            Rule::stmts => {
-                let stmts = pair
-                    .into_inner()
-                    .filter(|stmt| stmt.as_str() != "\n")
-                    .map(SyntaxNode::from)
-                    .collect();
-                SyntaxNode::Statements { stmts }
+                inner.next().unwrap().into(),
+            Rule::program => {
+                let body = take_stmts(&mut inner);
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::Program { body },
+                }
             }
             Rule::if_stmt => {
-                let mut inner = pair.into_inner();
-                let condition = inner.next().unwrap().into();
-                let then_body = optional_stmts(&mut inner);
-                let else_body = optional_stmts(&mut inner);
-                SyntaxNode::IfStmt {
-                    condition,
-                    then_body,
-                    else_body,
+                let condition = Box::new(inner.next().unwrap().into());
+                let then_body = take_stmts(&mut inner);
+                let else_body = take_stmts(&mut inner);
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::IfStmt {
+                        condition,
+                        then_body,
+                        else_body,
+                    },
                 }
             }
             Rule::while_stmt => {
-                let mut inner = pair.into_inner();
-                let condition = inner.next().unwrap().into();
-                let body = optional_stmts(&mut inner);
-                SyntaxNode::WhileStmt { condition, body }
+                let condition = Box::new(inner.next().unwrap().into());
+                let body = take_stmts(&mut inner);
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::WhileStmt { condition, body },
+                }
             }
             Rule::func_def => {
-                let mut inner = pair.into_inner();
-                let name = inner.next().unwrap().as_str().to_owned();
-                let params = inner.next().unwrap().into_inner().map(|param| param.as_str().to_owned()).collect();
-                let body = optional_stmts(&mut inner);
-                SyntaxNode::FuncDef {
-                    name,
-                    params,
-                    body,
+                let name = inner.next().unwrap().as_str().to_string();
+                let params = inner.next().unwrap().into_inner().map(|param| param.as_str().to_string()).collect();
+                let body = take_stmts(&mut inner);
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::FuncDef {
+                        name,
+                        params,
+                        body,
+                    },
                 }
             }
             Rule::return_stmt => {
-                let retval = pair.into_inner().next().unwrap().into();
-                SyntaxNode::Return { retval }
+                let retval = Box::new(pair.clone().into_inner().next().unwrap().into());
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::Return { retval },
+                }
             }
             Rule::assignment => {
-                let mut inner = pair.into_inner();
                 let expr = inner.next().unwrap();
-                if let Some(value) = inner.next() {
-                    let target = expr.as_str().to_owned();
-                    SyntaxNode::Assignment {
+                let Some(value) = inner.next() else {
+                    return expr.into();
+                };
+                let target = expr.as_str().to_string();
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::Assignment {
                         target,
-                        value: value.into(),
-                    }
-                } else {
-                    expr.into()
+                        value: Box::new(value.into()),
+                    },
                 }
             }
             Rule::comparison |
             Rule::bool_expr |
             Rule::term |
             Rule::factor => {
-                let mut inner = pair.into_inner();
                 let mut expr: SyntaxNode = inner.next().unwrap().into();
                 while let (Some(operator), Some(rhs)) = (inner.next(), inner.next()) {
-                    expr = SyntaxNode::BinaryExpr {
-                        operator: operator.as_str().into(),
-                        lhs: expr.into(),
-                        rhs: rhs.into(),
-                    }
+                    expr = SyntaxNode {
+                        pair: expr.pair.clone(), // not technically proper
+                        kind: NodeKind::BinaryExpr {
+                            operator: operator.as_str().into(),
+                            lhs: Box::new(expr),
+                            rhs: Box::new(rhs.into()),
+                        },
+                    };
                 }
                 expr
             }
             Rule::call => {
-                let mut inner = pair.into_inner();
                 let expr = inner.next().unwrap();
-                if let Some(arg_list) = inner.next() {
-                    let callee = expr.as_str().to_owned();
-                    let args = arg_list.into_inner().map(SyntaxNode::from).collect();
-                    SyntaxNode::Call { callee, args }
-                } else {
-                    expr.into()
+                let Some(arg_list) = inner.next() else {
+                    return expr.into();
+                };
+                let callee = expr.as_str().to_string();
+                let args = arg_list.into_inner().map(SyntaxNode::from).collect();
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::Call { callee, args },
                 }
             }
             Rule::number => {
                 let value = pair.as_str().parse().unwrap();
-                SyntaxNode::NumberLiteral { value }
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::NumberLiteral { value },
+                }
             }
             Rule::string => {
                 let lexeme = pair.as_str();
-                let value = lexeme[1..lexeme.len() - 1].to_owned(); // remove quotes
-                SyntaxNode::StringLiteral { value }
+                let value = lexeme[1..lexeme.len() - 1].to_string(); // remove quotes
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::StringLiteral { value },
+                }
             }
             Rule::boolean => {
                 let value = match pair.as_str() {
@@ -166,11 +203,20 @@ impl<'a> From<Pair<'a, Rule>> for SyntaxNode {
                     "false" => false,
                     _ => unreachable!(),
                 };
-                SyntaxNode::BooleanLiteral { value }
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::BooleanLiteral { value },
+                }
             }
             Rule::ident =>
-                SyntaxNode::Reference { name: pair.as_str().to_owned() },
-            Rule::nil => SyntaxNode::NilLiteral,
+                SyntaxNode {
+                    kind: NodeKind::Reference { name: pair.as_str().to_string() },
+                    pair,
+                },
+            Rule::nil => SyntaxNode {
+                pair,
+                kind: NodeKind::NilLiteral,
+            },
             rule => unimplemented!("Rule {rule:?}"),
         }
     }

@@ -1,29 +1,27 @@
 use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
-use std::ops::{Add, Sub};
-use crate::interpreter::ErrorVariant::{NameNotFound, TypeError};
+use std::ops::{Add, Mul, Sub};
 
-
-use crate::parser::{Operator, SyntaxNode};
+use crate::interpreter::ErrorVariant::{NameNotFound, SyntaxError, TypeError};
+use crate::parser::{NodeKind, Operator, SyntaxNode};
 
 #[derive(Clone, Debug)]
-pub struct Function {
+pub struct Function<'a> {
     name: String,
     params: Vec<String>,
-    body: Box<SyntaxNode>,
+    body: Vec<SyntaxNode<'a>>,
 }
 
 #[derive(Clone, Debug)]
-pub enum Value {
+pub enum Value<'a> {
     Number(f64),
     String(String),
     Bool(bool),
-    Function(Function),
-    Error(String),
+    Function(Function<'a>),
     Nil,
 }
 
-impl Value {
+impl<'a> Value<'a> {
     pub fn to_s(&self) -> String {
         match self {
             Value::Number(v) => v.to_string(),
@@ -31,7 +29,6 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Function(f) => format!("{}/{}", f.name, f.params.len()),
             Value::Nil => "nil".to_string(),
-            Value::Error(e) => format!("error: {e}"),
         }
     }
 
@@ -41,7 +38,6 @@ impl Value {
             Value::String(_) => "String",
             Value::Bool(_) => "Bool",
             Value::Function(_) => "Function",
-            Value::Error(_) => "Error",
             Value::Nil => "Nil",
         }
     }
@@ -56,8 +52,8 @@ impl Value {
 }
 
 
-pub struct Interpreter {
-    scopes: Vec<HashMap<String, Value>>,
+pub struct Interpreter<'a> {
+    scopes: Vec<HashMap<String, Value<'a>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -73,30 +69,32 @@ impl Display for Error {
     }
 }
 
+impl std::error::Error for Error {}
 
 #[derive(Debug, Clone)]
 pub enum ErrorVariant {
     NameNotFound,
     TypeError,
+    SyntaxError,
 }
 
-impl Interpreter {
+impl<'a> Interpreter<'a> {
     pub fn new() -> Self {
         Self {
             scopes: vec![Default::default()],
         }
     }
 
-    fn assign(&mut self, name: String, value: Value) {
+    fn assign(&mut self, name: String, value: Value<'a>) {
         self.scopes.first_mut().unwrap().insert(name, value);
     }
 
-    fn retrieve(&self, name: &str) -> Option<&Value> {
+    fn retrieve(&self, name: &str) -> Option<Value<'a>> {
         for scope in self.scopes.iter() {
             let Some(value) = scope.get(name) else {
                 continue;
             };
-            return Some(value);
+            return Some(value.clone());
         }
         None
     }
@@ -109,41 +107,51 @@ impl Interpreter {
         self.scopes.remove(0);
     }
 
-    pub fn exec(&mut self, node: SyntaxNode) -> Result<(), Error> {
-        match node {
-            SyntaxNode::Statements { stmts } => {
-                for stmt in stmts {
-                    self.eval(stmt)?;
-                };
+    pub fn exec(&mut self, node: SyntaxNode<'a>) -> Result<(), Error> {
+        match node.kind {
+            NodeKind::Program { body } => {
+                self.exec_seq(body)?;
             }
-            SyntaxNode::Assignment { target, value } => {
+            NodeKind::Assignment { target, value } => {
                 let value = self.eval(*value)?;
                 self.assign(target, value);
             }
-            SyntaxNode::IfStmt { condition, then_body, else_body } => {
+            NodeKind::IfStmt { condition, then_body, else_body } => {
                 let branch = if self.eval(*condition)?.is_truthy() { then_body } else { else_body };
-                self.exec(*branch)?;
+                self.exec_seq(branch)?;
             }
-            SyntaxNode::WhileStmt { condition, body } => {
+            NodeKind::WhileStmt { condition, body } => {
                 while self.eval(*condition.clone())?.is_truthy() {
-                    self.exec(*body.clone())?;
+                    self.exec_seq(body.clone())?;
                 }
             }
-            SyntaxNode::FuncDef { name, params, body } => {
+            NodeKind::FuncDef { name, params, body } => {
                 self.assign(name.clone(), Value::Function(Function {
                     name,
                     params,
                     body,
                 }));
             }
-            node => panic!("cannot exec node {node:?}")
+            kind => {
+                self.eval(SyntaxNode {
+                    pair: node.pair,
+                    kind,
+                })?;
+            }
         }
         Ok(())
     }
 
-    pub fn eval(&mut self, node: SyntaxNode) -> Result<Value, Error> {
-        let result = match node {
-            SyntaxNode::BinaryExpr { lhs, operator, rhs } => {
+    fn exec_seq(&mut self, stmts: impl IntoIterator<Item=SyntaxNode<'a>>) -> Result<(), Error> {
+        for stmt in stmts {
+            self.exec(stmt)?;
+        }
+        Ok(())
+    }
+
+    pub fn eval(&mut self, node: SyntaxNode<'a>) -> Result<Value<'a>, Error> {
+        let result = match node.kind {
+            NodeKind::BinaryExpr { lhs, operator, rhs } => {
                 let lhs = self.eval(*lhs)?;
                 let rhs = self.eval(*rhs)?;
                 match (operator, lhs, rhs) {
@@ -151,23 +159,28 @@ impl Interpreter {
                         Value::String(lhs.add(&rhs)),
                     (Operator::Add, Value::Number(lhs), Value::Number(rhs)) =>
                         Value::Number(lhs.add(rhs)),
+                    (Operator::Mul, Value::Number(lhs), Value::Number(rhs)) =>
+                        Value::Number(lhs.mul(rhs)),
                     (operator, lhs, rhs) =>
-                        Value::Error(format!("unsupported operator '{}' for {} and {}", <&str>::from(operator), lhs.type_name(), rhs.type_name()))
+                        return Err(Error {
+                            variant: TypeError,
+                            message: format!("unsupported operator '{}' for {} and {}", <&str>::from(operator), lhs.type_name(), rhs.type_name()),
+                        })
                 }
             }
-            SyntaxNode::Call { callee, args } => {
+            NodeKind::Call { callee, args } => {
                 match callee.as_str() {
                     "print" => {
-                        println!("{}", args
+                        let args = args
                             .into_iter()
-                            .map(|n| self.eval(n)?.to_s())
-                            .intersperse(" ".to_string())
-                            .collect::<String>()
-                        );
+                            .map(|n| self.eval(n).map(|v| v.to_s()))
+                            .collect::<Result<Vec<_>, Error>>()?;
+
+                        println!("{}", args.join(" "));
                         Value::Nil
                     }
                     func_name => {
-                        let Function { params, body, .. } = match self.retrieve(func_name) {
+                        let func = match self.retrieve(func_name) {
                             Some(Value::Function(f)) =>
                                 f.clone(),
                             Some(not_a_function) =>
@@ -181,33 +194,50 @@ impl Interpreter {
                                     message: format!("no such function: '{func_name}'"),
                                 }),
                         };
-                        self.push_scope();
-                        for (param, arg_node) in params.into_iter().zip(args) {
-                            let arg = self.eval(arg_node)?;
-                            self.assign(param, arg);
-                        }
-                        let result = self.eval(*body)?;
-                        self.pop_scope();
-                        result
+                        self.finish_call(func, args)?
                     }
                 }
             }
-            SyntaxNode::Reference { name } =>
+            NodeKind::Reference { name } =>
                 match self.retrieve(&name) {
                     Some(value) => value.clone(),
-                    None => Value::Error(format!("name '{name}' is not defined"))
+                    None => return Err(Error {
+                        variant: NameNotFound,
+                        message: format!("name '{name}' is not defined"),
+                    })
                 },
-            SyntaxNode::StringLiteral { value } =>
+            NodeKind::StringLiteral { value } =>
                 Value::String(value),
-            SyntaxNode::NumberLiteral { value } =>
+            NodeKind::NumberLiteral { value } =>
                 Value::Number(value),
-            SyntaxNode::BooleanLiteral { value } =>
+            NodeKind::BooleanLiteral { value } =>
                 Value::Bool(value),
-            SyntaxNode::NilLiteral =>
+            NodeKind::NilLiteral =>
                 Value::Nil,
-            SyntaxNode::Return { .. } =>
-                todo!(),
+            NodeKind::Return { .. } =>
+                return Err(Error {
+                    variant: SyntaxError,
+                    message: "'return' outside of function".to_string(),
+                }),
+            node => panic!("cannot eval node {node:?}")
         };
         Ok(result)
+    }
+
+    fn finish_call(&mut self, func: Function<'a>, args: Vec<SyntaxNode<'a>>) -> Result<Value<'a>, Error> {
+        let Function { params, body, .. } = func;
+        self.push_scope();
+        for (param, arg_node) in params.into_iter().zip(args) {
+            let arg = self.eval(arg_node)?;
+            self.assign(param, arg);
+        }
+        for SyntaxNode { kind, pair } in body {
+            match kind {
+                NodeKind::Return { retval } => return self.eval(*retval),
+                kind => self.exec(SyntaxNode { pair, kind })?,
+            }
+        }
+        self.pop_scope();
+        Ok(Value::Nil)
     }
 }

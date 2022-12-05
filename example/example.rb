@@ -1,5 +1,6 @@
 def f(a)
-    b = a * a
-    print("a =", a + 10, "b =", b)
+    return a * 100
 end
-f(100)
+print(f, f(10))
+
+return 3
