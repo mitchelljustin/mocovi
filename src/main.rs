@@ -21,8 +21,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     let Some(top_level_pair) = MocoviParser::parse(Rule::program, &source)?.next() else {
         return Err("empty program".into());
     };
-    let node = top_level_pair.into();
+    let node = SyntaxNode::from(top_level_pair);
     let mut interpreter = Interpreter::new();
-    interpreter.exec(node)?;
+    interpreter.init();
+    let result = interpreter.eval(node)?;
+    println!("result: {}", result.to_s());
     Ok(())
 }

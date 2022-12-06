@@ -18,12 +18,14 @@ stmt = {
 simple_stmt = {
   assignment |
   return_stmt |
+  func_def_one_line |
   expr
 }
 
 compound_stmt = {
     if_stmt |
     while_stmt |
+    for_stmt |
     func_def
 }
 
@@ -34,12 +36,18 @@ return_stmt = {
 if_stmt = {
     "if" ~ expr ~ NEWLINE ~
     stmts? ~
-    ("else" ~ NEWLINE ~ stmts ~ NEWLINE)? ~
+    ("else" ~ NEWLINE ~ stmts?)? ~
     "end"
 }
 
 while_stmt = {
     "while" ~ expr ~ NEWLINE ~
+    stmts? ~
+    "end"
+}
+
+for_stmt = {
+    "for" ~ ident ~ "in" ~ expr ~ NEWLINE ~
     stmts? ~
     "end"
 }
@@ -50,6 +58,9 @@ func_def = {
     "end"
 }
 
+func_def_one_line = {
+    "def" ~ ident ~ arg_list ~ "=" ~ expr
+}
 
 assignment = {
     ident ~ "=" ~ expr
@@ -96,10 +107,26 @@ primary = {
     boolean |
     nil |
     grouping |
+    array |
+    dict |
     ident
 }
 
 grouping = { "(" ~ expr ~ ")" }
+
+array = {
+    "[" ~ "]" |
+    "[" ~ expr ~ ("," ~ expr)* ~ ","? ~ "]"
+}
+
+dict = {
+    "[" ~ ":" ~ "]" |
+    "[" ~ dict_entry ~ ("," ~ dict_entry)* ~ ","? ~ "]"
+}
+
+dict_entry = {
+    (ident | string) ~ ":" ~ expr
+}
 
 boolean = { "true" | "false" }
 
@@ -113,7 +140,8 @@ ident = @{
 KEYWORD = {
     "do" | "end" | "def" |
     "or" | "and" |
-    "if" | "else" | "while" |
+    "if" | "else" |
+    "while" | "for" | "in" |
     "return"
 }
 

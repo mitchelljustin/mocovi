@@ -22,20 +22,6 @@ pub enum Operator {
     Div,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct Position {
-    line: usize,
-    col: usize,
-}
-
-impl Display for Position {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let Self { col, line } = self;
-        write!(f, "{line}:{col}")
-    }
-}
-
-
 #[derive(Debug, Clone)]
 pub struct SyntaxNode<'a> {
     pub pair: Pair<'a, Rule>,
@@ -50,6 +36,7 @@ pub enum NodeKind<'a> {
     // compound statements
     IfStmt { condition: Box<SyntaxNode<'a>>, then_body: Vec<SyntaxNode<'a>>, else_body: Vec<SyntaxNode<'a>> },
     WhileStmt { condition: Box<SyntaxNode<'a>>, body: Vec<SyntaxNode<'a>> },
+    ForStmt { target: String, iterator: Box<SyntaxNode<'a>>, body: Vec<SyntaxNode<'a>> },
     FuncDef { name: String, params: Vec<String>, body: Vec<SyntaxNode<'a>> },
 
     // simple statements
@@ -58,25 +45,40 @@ pub enum NodeKind<'a> {
 
     // expressions
     BinaryExpr { lhs: Box<SyntaxNode<'a>>, operator: Operator, rhs: Box<SyntaxNode<'a>> },
-    Call { callee: String, args: Vec<SyntaxNode<'a>> },
+    Call { target: String, args: Vec<SyntaxNode<'a>> },
 
     // primary
     Reference { name: String },
+
+    // literals
     StringLiteral { value: String },
     NumberLiteral { value: f64 },
     BooleanLiteral { value: bool },
     NilLiteral,
+
+    // collection literals
+    ArrayLiteral { elements: Vec<SyntaxNode<'a>> },
+    DictLiteral { entries: Vec<(String, SyntaxNode<'a>)> },
 }
 
-fn take_stmts<'a>(inner: &mut Pairs<'a, Rule>) -> Vec<SyntaxNode<'a>> {
-    match inner.next() {
-        Some(stmts) => stmts
+fn collect_sequence(pair: Option<Pair<Rule>>) -> Vec<SyntaxNode> {
+    match pair {
+        Some(elements) => elements
             .into_inner()
-            .filter(|stmt| !stmt.as_str().trim().is_empty())
+            .filter(|sub_pair| !sub_pair.as_str().trim().is_empty())
             .map(SyntaxNode::from)
             .collect(),
         None => Vec::new(),
     }
+}
+
+fn collect_func_sig(inner: &mut Pairs<Rule>) -> (String, Vec<String>) {
+    let name = inner.next().unwrap().as_str().to_string();
+    let params = inner.next().unwrap()
+        .into_inner()
+        .map(|param| param.as_str().to_string())
+        .collect();
+    (name, params)
 }
 
 impl<'a> From<Pair<'a, Rule>> for SyntaxNode<'a> {
@@ -92,7 +94,7 @@ impl<'a> From<Pair<'a, Rule>> for SyntaxNode<'a> {
             Rule::primary =>
                 inner.next().unwrap().into(),
             Rule::program => {
-                let body = take_stmts(&mut inner);
+                let body = collect_sequence(inner.next());
                 SyntaxNode {
                     pair,
                     kind: NodeKind::Program { body },
@@ -100,8 +102,8 @@ impl<'a> From<Pair<'a, Rule>> for SyntaxNode<'a> {
             }
             Rule::if_stmt => {
                 let condition = Box::new(inner.next().unwrap().into());
-                let then_body = take_stmts(&mut inner);
-                let else_body = take_stmts(&mut inner);
+                let then_body = collect_sequence(inner.next());
+                let else_body = collect_sequence(inner.next());
                 SyntaxNode {
                     pair,
                     kind: NodeKind::IfStmt {
@@ -113,16 +115,69 @@ impl<'a> From<Pair<'a, Rule>> for SyntaxNode<'a> {
             }
             Rule::while_stmt => {
                 let condition = Box::new(inner.next().unwrap().into());
-                let body = take_stmts(&mut inner);
+                let body = collect_sequence(inner.next());
                 SyntaxNode {
                     pair,
                     kind: NodeKind::WhileStmt { condition, body },
                 }
             }
+            Rule::for_stmt => {
+                let target = inner.next().unwrap().as_str().to_string();
+                let iterator = Box::new(inner.next().unwrap().into());
+                let body = collect_sequence(inner.next());
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::ForStmt { target, iterator, body },
+                }
+            }
+            Rule::array => {
+                let elements = pair.clone()
+                    .into_inner()
+                    .map(SyntaxNode::from)
+                    .collect();
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::ArrayLiteral { elements },
+                }
+            }
+            Rule::dict => {
+                let entries = pair.clone()
+                    .into_inner()
+                    .map(|entry_pair| {
+                        let mut entry_inner = entry_pair.into_inner();
+                        let key_pair = entry_inner.next().unwrap();
+                        let key = match key_pair.as_rule() {
+                            Rule::ident => key_pair.as_str(),
+                            Rule::string => {
+                                let key = key_pair.as_str();
+                                &key[1..key.len() - 1]
+                            }
+                            _ => unreachable!(),
+                        };
+                        let value = entry_inner.next().unwrap().into();
+                        (key.to_string(), value)
+                    })
+                    .collect();
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::DictLiteral { entries },
+                }
+            }
+            Rule::func_def_one_line => {
+                let (name, params) = collect_func_sig(&mut inner);
+                let body = vec![inner.next().unwrap().into()];
+                SyntaxNode {
+                    pair,
+                    kind: NodeKind::FuncDef {
+                        name,
+                        params,
+                        body,
+                    },
+                }
+            }
             Rule::func_def => {
-                let name = inner.next().unwrap().as_str().to_string();
-                let params = inner.next().unwrap().into_inner().map(|param| param.as_str().to_string()).collect();
-                let body = take_stmts(&mut inner);
+                let (name, params) = collect_func_sig(&mut inner);
+                let body = collect_sequence(inner.next());
                 SyntaxNode {
                     pair,
                     kind: NodeKind::FuncDef {
@@ -175,11 +230,11 @@ impl<'a> From<Pair<'a, Rule>> for SyntaxNode<'a> {
                 let Some(arg_list) = inner.next() else {
                     return expr.into();
                 };
-                let callee = expr.as_str().to_string();
+                let target = expr.as_str().to_string();
                 let args = arg_list.into_inner().map(SyntaxNode::from).collect();
                 SyntaxNode {
                     pair,
-                    kind: NodeKind::Call { callee, args },
+                    kind: NodeKind::Call { target, args },
                 }
             }
             Rule::number => {
