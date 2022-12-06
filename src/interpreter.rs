@@ -2,28 +2,30 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::ops::{Add, Mul};
 
+use pest::Parser;
+
 use Value::{Bool, Dict, Nil, Number};
 
-use crate::interpreter::ErrorVariant::{ArityError, NameNotFound, SyntaxError, TypeError};
+use crate::interpreter::ErrorKind::{ArityError, NameNotFound, SyntaxError, TypeError};
 use crate::interpreter::Value::Array;
-use crate::parser::{NodeKind, Operator, SyntaxNode};
+use crate::parser::{MocoviParser, NodeKind, Operator, Rule, SyntaxNode};
 
 #[derive(Clone, Debug)]
-pub struct Function<'a> {
+pub struct Function {
     name: String,
     params: Vec<String>,
-    body: FunctionBody<'a>,
+    body: FunctionBody,
 }
 
-type BuiltinFunction<'a> = fn(&mut Interpreter<'a>, Vec<Value<'a>>) -> Result<Value<'a>, Error>;
+type BuiltinFunction = fn(&mut Interpreter, Vec<Value>) -> Result<Value, Error>;
 
 #[derive(Clone)]
-pub enum FunctionBody<'a> {
-    Builtin(BuiltinFunction<'a>),
-    User(Vec<SyntaxNode<'a>>),
+pub enum FunctionBody {
+    Builtin(BuiltinFunction),
+    User(Vec<SyntaxNode>),
 }
 
-impl<'a> Debug for FunctionBody<'a> {
+impl Debug for FunctionBody {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             FunctionBody::User(body) =>
@@ -35,17 +37,17 @@ impl<'a> Debug for FunctionBody<'a> {
 }
 
 #[derive(Clone, Debug)]
-pub enum Value<'a> {
+pub enum Value {
     Number(f64),
     String(String),
     Bool(bool),
-    Function(Function<'a>),
-    Array(Vec<Value<'a>>),
-    Dict(HashMap<String, Value<'a>>),
+    Function(Function),
+    Array(Vec<Value>),
+    Dict(HashMap<String, Value>),
     Nil,
 }
 
-impl<'a> Value<'a> {
+impl Value {
     pub fn to_s(&self) -> String {
         match self {
             Number(v) =>
@@ -99,48 +101,59 @@ impl<'a> Value<'a> {
 }
 
 
-pub struct Interpreter<'a> {
-    scopes: Vec<HashMap<String, Value<'a>>>,
+pub struct Interpreter {
+    scopes: Vec<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Error {
-    variant: ErrorVariant,
-    message: String,
+    kind: ErrorKind,
+    msg: String,
+    pub loc: String,
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let Error { variant, message } = self;
-        write!(f, "{variant:?}: {message}")
+        let Self { kind, msg, loc } = self;
+        write!(f, "{loc}\n{kind:?}: {msg}")
     }
 }
 
 impl std::error::Error for Error {}
 
+
 #[derive(Debug, Clone)]
-pub enum ErrorVariant {
+pub enum ErrorKind {
     NameNotFound,
     TypeError,
     SyntaxError,
     ArityError,
 }
 
+impl Display for ErrorKind {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        Debug::fmt(self, f)
+    }
+}
+
 fn expect_arity(func_name: &str, expected: usize, actual: usize) -> Result<(), Error> {
     if expected != actual {
         return Err(Error {
-            variant: ArityError,
-            message: format!("function '{func_name}' expected {expected} arguments, got {actual}"),
+            kind: ArityError,
+            loc: "???".to_string(),
+            msg: format!("function '{func_name}' expected {expected} arguments, got {actual}"),
         });
     }
     Ok(())
 }
 
-impl<'a> Interpreter<'a> {
+impl Interpreter {
     pub fn new() -> Self {
-        Self {
+        let mut me = Self {
             scopes: vec![Default::default()],
-        }
+        };
+        me.init();
+        me
     }
 
     pub fn init(&mut self) {
@@ -161,19 +174,19 @@ impl<'a> Interpreter<'a> {
         });
     }
 
-    fn define_builtin<const N: usize>(&mut self, name: &str, params: [&str; N], function: BuiltinFunction<'a>) {
+    fn define_builtin<const N: usize>(&mut self, name: &str, params: [&str; N], function: BuiltinFunction) {
         self.assign(name.to_string(), Value::Function(Function {
             name: name.to_string(),
-            params: params.map(ToString::to_string).into_iter().collect(),
+            params: params.map(ToString::to_string).to_vec(),
             body: FunctionBody::Builtin(function),
         }));
     }
 
-    fn assign(&mut self, name: String, value: Value<'a>) {
+    fn assign(&mut self, name: String, value: Value) {
         self.scopes.first_mut().unwrap().insert(name, value);
     }
 
-    fn retrieve(&self, name: &str) -> Option<&Value<'a>> {
+    fn retrieve(&self, name: &str) -> Option<&Value> {
         for scope in self.scopes.iter() {
             let Some(value) = scope.get(name) else {
                 continue;
@@ -191,7 +204,7 @@ impl<'a> Interpreter<'a> {
         self.scopes.remove(0);
     }
 
-    fn eval_seq(&mut self, stmts: impl IntoIterator<Item=SyntaxNode<'a>>) -> Result<Value<'a>, Error> {
+    fn eval_seq(&mut self, stmts: impl IntoIterator<Item=SyntaxNode>) -> Result<Value, Error> {
         let mut result = Nil;
         for stmt in stmts {
             result = self.eval(stmt)?;
@@ -199,8 +212,16 @@ impl<'a> Interpreter<'a> {
         Ok(result)
     }
 
-    pub fn eval(&mut self, node: SyntaxNode<'a>) -> Result<Value<'a>, Error> {
-        let result = match node.kind {
+    pub fn eval_source(&mut self, source: &str) -> Result<Value, Box<dyn std::error::Error>> {
+        let Some(top_level_pair) = MocoviParser::parse(Rule::program, source)?.next() else {
+            unreachable!();
+        };
+        let node = SyntaxNode::from(top_level_pair);
+        self.eval(node).map_err(Into::into)
+    }
+
+    pub fn eval(&mut self, node: SyntaxNode) -> Result<Value, Error> {
+        let result = match node.kind.clone() {
             // statements
             NodeKind::Program { body } => {
                 self.eval_seq(body)?
@@ -221,11 +242,12 @@ impl<'a> Interpreter<'a> {
                 Nil
             }
             NodeKind::ForStmt { target, iterator, body } => {
-                let iterator = self.eval(*iterator)?;
-                let Array(elements) = iterator else {
+                let live_iterator = self.eval(*iterator.clone())?;
+                let Array(elements) = live_iterator else {
                     return Err(Error {
-                        variant: TypeError,
-                        message: format!("for..in expected Array type, got {}", iterator.type_name()),
+                        kind: TypeError,
+                        loc: iterator.to_string(),
+                        msg: format!("for..in expected Array type, got {}", live_iterator.type_name()),
                     });
                 };
                 self.push_scope();
@@ -259,8 +281,9 @@ impl<'a> Interpreter<'a> {
 
                     (operator, lhs, rhs) =>
                         return Err(Error {
-                            variant: TypeError,
-                            message: format!("unsupported operator '{}' for {} and {}", <&str>::from(operator), lhs.type_name(), rhs.type_name()),
+                            kind: TypeError,
+                            loc: node.to_string(),
+                            msg: format!("unsupported operator '{}' for {} and {}", <&str>::from(operator), lhs.type_name(), rhs.type_name()),
                         })
                 }
             }
@@ -269,13 +292,15 @@ impl<'a> Interpreter<'a> {
                     Some(Value::Function(f)) => f.clone(),
                     Some(not_a_function) =>
                         return Err(Error {
-                            variant: TypeError,
-                            message: format!("expected Function, got {}", not_a_function.type_name()),
+                            kind: TypeError,
+                            loc: node.to_string(),
+                            msg: format!("expected Function, got {}", not_a_function.type_name()),
                         }),
                     None =>
                         return Err(Error {
-                            variant: NameNotFound,
-                            message: format!("no such function: '{target}'"),
+                            kind: NameNotFound,
+                            loc: node.to_string(),
+                            msg: format!("no such function: '{target}'"),
                         }),
                 };
                 self.finish_call(func, args)?
@@ -284,8 +309,9 @@ impl<'a> Interpreter<'a> {
                 match self.retrieve(&name) {
                     Some(value) => value.clone(),
                     None => return Err(Error {
-                        variant: NameNotFound,
-                        message: format!("name '{name}' is not defined"),
+                        kind: NameNotFound,
+                        loc: node.to_string(),
+                        msg: format!("name '{name}' is not defined"),
                     })
                 },
             NodeKind::StringLiteral { value } =>
@@ -314,14 +340,15 @@ impl<'a> Interpreter<'a> {
                 Nil,
             NodeKind::Return { .. } =>
                 return Err(Error {
-                    variant: SyntaxError,
-                    message: "'return' outside of function".to_string(),
+                    kind: SyntaxError,
+                    loc: node.to_string(),
+                    msg: "'return' outside of function".to_string(),
                 }),
         };
         Ok(result)
     }
 
-    fn finish_call(&mut self, Function { params, body, .. }: Function<'a>, args: Vec<SyntaxNode<'a>>) -> Result<Value<'a>, Error> {
+    fn finish_call(&mut self, Function { params, body, .. }: Function, args: Vec<SyntaxNode>) -> Result<Value, Error> {
         let mut result = Nil;
         let args = args
             .into_iter()
@@ -337,7 +364,8 @@ impl<'a> Interpreter<'a> {
                     result = match &stmt.kind {
                         NodeKind::Return { retval } =>
                             return self.eval(*retval.clone()),
-                        _ => self.eval(stmt)?,
+                        _ =>
+                            self.eval(stmt)?,
                     };
                 }
                 self.pop_scope();
