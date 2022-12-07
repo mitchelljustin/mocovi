@@ -38,7 +38,7 @@ impl Display for SyntaxNode {
 }
 
 impl SyntaxNode {
-    pub fn new(pair: &Pair<'_, Rule>, kind: NodeKind) -> Self {
+    pub fn new(pair: &Pair<Rule>, kind: NodeKind) -> Self {
         Self {
             line_col: pair.as_span().start_pos().line_col(),
             source: pair.as_str().to_string(),
@@ -237,11 +237,10 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
             Rule::bool_expr |
             Rule::term |
             Rule::factor => {
-                let start_pair = inner.next().unwrap();
-                let mut expr = start_pair.clone().into();
+                let mut expr = inner.next().unwrap().into();
                 while let (Some(operator), Some(rhs)) = (inner.next(), inner.next()) {
                     expr = SyntaxNode::new(
-                        &start_pair, // not technically proper
+                        &pair,
                         NodeKind::BinaryExpr {
                             operator: operator.as_str().into(),
                             lhs: Box::new(expr),
@@ -252,11 +251,11 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
                 expr
             }
             Rule::call => {
-                let expr = inner.next().unwrap();
+                let target = inner.next().unwrap();
                 let Some(arg_list) = inner.next() else {
-                    return expr.into();
+                    return target.into();
                 };
-                let target = expr.as_str().to_string();
+                let target = target.as_str().to_string();
                 let args = arg_list.into_inner().map(SyntaxNode::from).collect();
                 SyntaxNode::new(
                     &pair,

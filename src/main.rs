@@ -10,7 +10,7 @@ use std::io::{BufRead, stdin, stdout, Write};
 
 use ansi_term::Color::{Green, Red};
 
-use crate::interpreter::{Interpreter, Value};
+use crate::interpreter::{Interpreter, RustValue};
 
 mod parser;
 mod interpreter;
@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let mut line = maybe_line?;
         line.push('\n');
         match interpreter.eval_source(&line) {
-            Ok(Value::Nil) => {}
+            Ok(RustValue::Nil) => {}
             Ok(result) =>
                 println!("=> {}", Green.paint(result.to_s())),
             Err(error) =>

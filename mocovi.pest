@@ -26,7 +26,8 @@ compound_stmt = {
     if_stmt |
     while_stmt |
     for_stmt |
-    func_def
+    func_def |
+    class_def
 }
 
 return_stmt = {
@@ -54,6 +55,12 @@ for_stmt = {
 
 func_def = {
     "def" ~ ident ~ arg_list ~ NEWLINE ~
+    stmts? ~
+    "end"
+}
+
+class_def = {
+    "class" ~ ident ~ NEWLINE ~
     stmts? ~
     "end"
 }

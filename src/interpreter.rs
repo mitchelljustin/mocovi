@@ -4,95 +4,38 @@ use std::ops::{Add, Mul};
 
 use pest::Parser;
 
-use Value::{Bool, Dict, Nil, Number};
-
-use crate::interpreter::ErrorKind::{ArityError, NameNotFound, SyntaxError, TypeError};
-use crate::interpreter::Value::Array;
+use crate::interpreter::ErrorKind::{NameNotFound, SyntaxError, TypeError};
 use crate::parser::{MocoviParser, NodeKind, Operator, Rule, SyntaxNode};
 
-#[derive(Clone, Debug)]
-pub struct Function {
-    name: String,
-    params: Vec<String>,
-    body: FunctionBody,
-}
 
-type BuiltinFunction = fn(&mut Interpreter, Vec<Value>) -> Result<Value, Error>;
+#[derive(Clone, Debug, Default)]
+pub enum RustValue {
+    #[default]
+    Nil,
 
-#[derive(Clone)]
-pub enum FunctionBody {
-    Builtin(BuiltinFunction),
-    User(Vec<SyntaxNode>),
-}
-
-impl Debug for FunctionBody {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FunctionBody::User(body) =>
-                f.debug_list().entries(body).finish(),
-            FunctionBody::Builtin(_) =>
-                write!(f, "<builtin>"),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum Value {
-    Number(f64),
+    F64(f64),
     String(String),
     Bool(bool),
-    Function(Function),
-    Array(Vec<Value>),
-    Dict(HashMap<String, Value>),
-    Nil,
+    Method(Method),
+    Vec(Vec<ObjectId>),
+    HashMap(HashMap<String, ObjectId>),
 }
 
-impl Value {
-    pub fn to_s(&self) -> String {
-        match self {
-            Number(v) =>
-                v.to_string(),
-            Value::String(s) =>
-                format!("\"{s}\""),
-            Bool(b) =>
-                b.to_string(),
-            Value::Function(f) =>
-                format!("{}({})", f.name, f.params.join(", ")),
-            Nil =>
-                "nil".to_string(),
-            Array(elements) =>
-                format!("[{}]", elements.iter()
-                    .map(Self::to_s)
-                    .intersperse(", ".to_string())
-                    .collect::<String>()),
-            Dict(entries) =>
-                format!("[{}]",
-                        if entries.is_empty() {
-                            ":".to_string()
-                        } else {
-                            entries
-                                .iter()
-                                .map(|(k, v)| format!("\"{k}\": {}", v.to_s()))
-                                .intersperse(", ".to_string())
-                                .collect::<String>()
-                        }),
-        }
-    }
+#[derive(Debug, Clone, Copy)]
+struct ObjectId(usize);
 
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            Number(_) => "Number",
-            Value::String(_) => "String",
-            Bool(_) => "Bool",
-            Value::Function(_) => "Function",
-            Nil => "Nil",
-            Array(_) => "Array",
-            Dict(_) => "Dict"
-        }
-    }
+#[derive(Clone, Debug)]
+pub struct Object {
+    object_id: ObjectId,
+    class_id: ObjectId,
+    underlying: RustValue,
+    methods: HashMap<String, Method>,
+    properties: HashMap<String, ObjectId>,
+}
 
+impl RustValue {
     pub fn is_falsy(&self) -> bool {
-        matches!(self, Value::Bool(false) | Value::Nil)
+        matches!(self, RustValue::Bool(false) | RustValue::Nil)
     }
 
     pub fn is_truthy(&self) -> bool {
@@ -100,16 +43,49 @@ impl Value {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct Method {
+    name: String,
+    params: Vec<String>,
+    receiver: MethodReceiver,
+    body: MethodBody,
+}
+
+#[derive(Clone, Debug, Copy)]
+pub enum MethodReceiver {
+    Instance,
+    Class,
+}
+
+type BuiltinMethod = fn(&mut Interpreter, Vec<Object>) -> Result<Object, Error>;
+
+#[derive(Clone)]
+pub enum MethodBody {
+    Builtin(BuiltinMethod),
+    User(Vec<SyntaxNode>),
+}
+
+impl Debug for MethodBody {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MethodBody::User(body) =>
+                f.debug_list().entries(body).finish(),
+            MethodBody::Builtin(_) =>
+                write!(f, "<builtin>"),
+        }
+    }
+}
 
 pub struct Interpreter {
-    scopes: Vec<HashMap<String, Value>>,
+    objects: Vec<Object>,
+    scope_stack: Vec<HashMap<String, ObjectId>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Error {
     kind: ErrorKind,
     msg: String,
-    pub loc: String,
+    loc: String,
 }
 
 impl Display for Error {
@@ -136,83 +112,88 @@ impl Display for ErrorKind {
     }
 }
 
-fn expect_arity(func_name: &str, expected: usize, actual: usize) -> Result<(), Error> {
-    if expected != actual {
-        return Err(Error {
-            kind: ArityError,
-            loc: "???".to_string(),
-            msg: format!("function '{func_name}' expected {expected} arguments, got {actual}"),
-        });
-    }
-    Ok(())
-}
+
+const CLASS_CLASS_ID: ObjectId = ObjectId(0);
+const NIL: ObjectId = ObjectId(2);
 
 impl Interpreter {
     pub fn new() -> Self {
         let mut me = Self {
-            scopes: vec![Default::default()],
+            objects: Default::default(),
+            scope_stack: vec![Default::default()],
         };
         me.init();
         me
     }
 
-    pub fn init(&mut self) {
-        self.define_builtin("print", [], |_, args| {
-            println!("{}", args
-                .into_iter()
-                .map(|n| match n {
-                    Value::String(string) => string,
-                    not_string => not_string.to_s(),
-                })
-                .intersperse(" ".to_string())
-                .collect::<String>());
-            Ok(Nil)
+    fn init(&mut self) {
+        self.create_class("Class".to_string()); // ID=0
+        let nil_class = self.create_class("Nil".to_string()); // ID=1
+        self.create_object(nil_class); // Needs to be ID=2
+    }
+
+
+    fn create_object(&mut self, class_id: ObjectId) -> ObjectId {
+        let object_id = ObjectId(self.objects.len());
+        self.objects.push(Object {
+            object_id,
+            class_id,
+            underlying: Default::default(),
+            methods: Default::default(),
+            properties: Default::default(),
         });
-        self.define_builtin("type", ["obj"], |_, args| {
-            expect_arity("type", 1, args.len())?;
-            Ok(Value::String(args[0].type_name().to_string()))
-        });
+        object_id
     }
 
-    fn define_builtin<const N: usize>(&mut self, name: &str, params: [&str; N], function: BuiltinFunction) {
-        self.assign(name.to_string(), Value::Function(Function {
-            name: name.to_string(),
-            params: params.map(ToString::to_string).to_vec(),
-            body: FunctionBody::Builtin(function),
-        }));
+    fn create_class(&mut self, name: String) -> ObjectId {
+        let class_id = self.create_object(CLASS_CLASS_ID);
+        self.assign(name, class_id);
+        class_id
     }
 
-    fn assign(&mut self, name: String, value: Value) {
-        self.scopes.first_mut().unwrap().insert(name, value);
+    fn nil(&self) -> &Object {
+        self.object(NIL)
     }
 
-    fn retrieve(&self, name: &str) -> Option<&Value> {
-        for scope in self.scopes.iter() {
-            let Some(value) = scope.get(name) else {
+    pub fn object(&self, ObjectId(index): ObjectId) -> &Object {
+        &self.objects[index]
+    }
+
+    pub fn object_mut(&mut self, ObjectId(index): ObjectId) -> &mut Object {
+        &mut self.objects[index]
+    }
+
+    fn assign(&mut self, name: String, value: ObjectId) {
+        self.scope_stack.first_mut().unwrap().insert(name, value);
+    }
+
+    fn retrieve(&self, name: &str) -> Option<ObjectId> {
+        for scope in self.scope_stack.iter() {
+            let Some(id) = scope.get(name) else {
                 continue;
             };
-            return Some(value);
+            return Some(*id);
         }
         None
     }
 
     fn push_scope(&mut self) {
-        self.scopes.insert(0, HashMap::new());
+        self.scope_stack.insert(0, HashMap::new());
     }
 
     fn pop_scope(&mut self) {
-        self.scopes.remove(0);
+        self.scope_stack.remove(0);
     }
 
-    fn eval_seq(&mut self, stmts: impl IntoIterator<Item=SyntaxNode>) -> Result<Value, Error> {
-        let mut result = Nil;
+    fn eval_seq(&mut self, stmts: impl IntoIterator<Item=SyntaxNode>) -> Result<ObjectId, Error> {
+        let mut result = NIL;
         for stmt in stmts {
             result = self.eval(stmt)?;
         }
         Ok(result)
     }
 
-    pub fn eval_source(&mut self, source: &str) -> Result<Value, Box<dyn std::error::Error>> {
+    pub fn eval_source(&mut self, source: &str) -> Result<ObjectId, Box<dyn std::error::Error>> {
         let Some(top_level_pair) = MocoviParser::parse(Rule::program, source)?.next() else {
             unreachable!();
         };
@@ -220,7 +201,7 @@ impl Interpreter {
         self.eval(node).map_err(Into::into)
     }
 
-    pub fn eval(&mut self, node: SyntaxNode) -> Result<Value, Error> {
+    pub fn eval(&mut self, node: SyntaxNode) -> Result<ObjectId, Error> {
         let result = match node.kind.clone() {
             // statements
             NodeKind::Program { body } => {
@@ -229,21 +210,26 @@ impl Interpreter {
             NodeKind::Assignment { target, value } => {
                 let value = self.eval(*value)?;
                 self.assign(target, value);
-                Nil
+                NIL
             }
             NodeKind::IfStmt { condition, then_body, else_body } => {
-                let branch = if self.eval(*condition)?.is_truthy() { then_body } else { else_body };
+                let branch =
+                    if self.object(self.eval(*condition)?).underlying.is_truthy() {
+                        then_body
+                    } else {
+                        else_body
+                    };
                 self.eval_seq(branch)?
             }
             NodeKind::WhileStmt { condition, body } => {
-                while self.eval(*condition.clone())?.is_truthy() {
+                while self.object(self.eval(*condition.clone())?).underlying.is_truthy() {
                     self.eval_seq(body.clone())?;
                 }
-                Nil
+                NIL
             }
             NodeKind::ForStmt { target, iterator, body } => {
-                let live_iterator = self.eval(*iterator.clone())?;
-                let Array(elements) = live_iterator else {
+                let live_iterator = self.object(self.eval(*iterator.clone())?);
+                let RustValue::Vec(ref elements) = live_iterator.underlying else {
                     return Err(Error {
                         kind: TypeError,
                         loc: iterator.to_string(),
@@ -252,31 +238,33 @@ impl Interpreter {
                 };
                 self.push_scope();
                 for item in elements {
-                    self.assign(target.clone(), item);
+                    self.assign(target.clone(), *item);
                     self.eval_seq(body.clone())?;
                 }
                 self.pop_scope();
-                Nil
+                NIL
             }
             NodeKind::FuncDef { name, params, body } => {
-                self.assign(name.clone(), Value::Function(Function {
+                self.assign(name.clone(), RustValue::Method(Method {
                     name,
                     params,
-                    body: FunctionBody::User(body),
+                    receiver: ,
+                    body: MethodBody::User(body),
                 }));
-                Nil
+                NIL
             }
             NodeKind::BinaryExpr { lhs, operator, rhs } => {
+                use RustValue::{F64, Bool};
                 let lhs = self.eval(*lhs)?;
                 let rhs = self.eval(*rhs)?;
                 match (operator, lhs, rhs) {
-                    (Operator::Add, Value::String(lhs), Value::String(rhs)) =>
-                        Value::String(lhs.add(&rhs)),
-                    (Operator::Add, Number(lhs), Number(rhs)) =>
-                        Number(lhs.add(rhs)),
-                    (Operator::Mul, Number(lhs), Number(rhs)) =>
-                        Number(lhs.mul(rhs)),
-                    (Operator::Less, Number(lhs), Number(rhs)) =>
+                    (Operator::Add, RustValue::String(lhs), RustValue::String(rhs)) =>
+                        RustValue::String(lhs.add(&rhs)),
+                    (Operator::Add, F64(lhs), F64(rhs)) =>
+                        F64(lhs.add(rhs)),
+                    (Operator::Mul, F64(lhs), F64(rhs)) =>
+                        F64(lhs.mul(rhs)),
+                    (Operator::Less, F64(lhs), F64(rhs)) =>
                         Bool(lhs.lt(&rhs)),
 
                     (operator, lhs, rhs) =>
@@ -289,7 +277,7 @@ impl Interpreter {
             }
             NodeKind::Call { target, args } => {
                 let func = match self.retrieve(&target) {
-                    Some(Value::Function(f)) => f.clone(),
+                    Some(RustValue::Method(f)) => f.clone(),
                     Some(not_a_function) =>
                         return Err(Error {
                             kind: TypeError,
@@ -315,9 +303,9 @@ impl Interpreter {
                     })
                 },
             NodeKind::StringLiteral { value } =>
-                Value::String(value),
+                RustValue::String(value),
             NodeKind::NumberLiteral { value } =>
-                Number(value),
+                F64(value),
             NodeKind::BooleanLiteral { value } =>
                 Bool(value),
             NodeKind::ArrayLiteral { elements } => {
@@ -325,7 +313,7 @@ impl Interpreter {
                     .into_iter()
                     .map(|node| self.eval(node))
                     .collect::<Result<_, _>>()?;
-                Array(elements)
+                Vec(elements)
             }
             NodeKind::DictLiteral { entries } => {
                 let mut live_entries = HashMap::new();
@@ -333,7 +321,7 @@ impl Interpreter {
                     let value = self.eval(value)?;
                     live_entries.insert(key, value);
                 }
-                Dict(live_entries)
+                HashMap(live_entries)
             }
 
             NodeKind::NilLiteral =>
@@ -348,14 +336,14 @@ impl Interpreter {
         Ok(result)
     }
 
-    fn finish_call(&mut self, Function { params, body, .. }: Function, args: Vec<SyntaxNode>) -> Result<Value, Error> {
+    fn finish_call(&mut self, Method { params, body, .. }: Method, args: Vec<SyntaxNode>) -> Result<RustValue, Error> {
         let mut result = Nil;
         let args = args
             .into_iter()
             .map(|node| self.eval(node))
             .collect::<Result<_, _>>()?;
         match body {
-            FunctionBody::User(statements) => {
+            MethodBody::User(statements) => {
                 self.push_scope();
                 for (param, arg) in params.into_iter().zip(args) {
                     self.assign(param, arg);
@@ -370,7 +358,7 @@ impl Interpreter {
                 }
                 self.pop_scope();
             }
-            FunctionBody::Builtin(function) => {
+            MethodBody::Builtin(function) => {
                 result = function(self, args)?;
             }
         }
