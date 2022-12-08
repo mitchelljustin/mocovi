@@ -107,7 +107,7 @@ fn collect_func_sig(inner: &mut Pairs<Rule>) -> (String, Vec<String>) {
 }
 
 impl From<Pair<'_, Rule>> for SyntaxNode {
-    fn from(pair: Pair<'_, Rule>) -> Self {
+    fn from(pair: Pair<Rule>) -> Self {
         let mut inner = pair.clone().into_inner();
         let rule = pair.as_rule();
         match rule {

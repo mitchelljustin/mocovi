@@ -26,6 +26,7 @@ compound_stmt = {
     if_stmt |
     while_stmt |
     for_stmt |
+    class_def |
     func_def
 }
 
@@ -60,6 +61,18 @@ func_def = {
 
 func_def_one_line = {
     "def" ~ ident ~ arg_list ~ "=" ~ expr
+}
+
+class_def = {
+    "class" ~ ident ~ class_arg_list? ~ NEWLINE ~
+    stmts? ~
+    "end"
+}
+
+class_arg_list = {
+    "(" ~
+        (ident ~ ":" ~ ident)* ~
+    ")"
 }
 
 assignment = {

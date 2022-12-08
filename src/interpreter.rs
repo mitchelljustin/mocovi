@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
-use std::ops::{Add, Mul};
+use std::ops::{Add, Div, Mul, Sub};
 
 use pest::Parser;
 
@@ -36,15 +36,27 @@ impl Debug for FunctionBody {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub enum Value {
+    #[default]
+    Nil,
+
+    Object(Object),
     Number(f64),
     String(String),
     Bool(bool),
     Function(Function),
     Array(Vec<Value>),
     Dict(HashMap<String, Value>),
-    Nil,
+}
+
+#[derive(Clone, Debug)]
+pub struct Id(usize);
+
+#[derive(Clone, Debug)]
+pub struct Object {
+    class: Id,
+
 }
 
 impl Value {
@@ -272,12 +284,30 @@ impl Interpreter {
                 match (operator, lhs, rhs) {
                     (Operator::Add, Value::String(lhs), Value::String(rhs)) =>
                         Value::String(lhs.add(&rhs)),
+                    (Operator::Mul, Value::String(string), Number(n)) =>
+                        Value::String(string.repeat(n as _)),
+
                     (Operator::Add, Number(lhs), Number(rhs)) =>
                         Number(lhs.add(rhs)),
+                    (Operator::Sub, Number(lhs), Number(rhs)) =>
+                        Number(lhs.sub(rhs)),
                     (Operator::Mul, Number(lhs), Number(rhs)) =>
                         Number(lhs.mul(rhs)),
+                    (Operator::Div, Number(lhs), Number(rhs)) =>
+                        Number(lhs.div(rhs)),
+
+                    (Operator::Equal, Number(lhs), Number(rhs)) =>
+                        Bool(lhs.eq(&rhs)),
+                    (Operator::NotEqual, Number(lhs), Number(rhs)) =>
+                        Bool(lhs.ne(&rhs)),
                     (Operator::Less, Number(lhs), Number(rhs)) =>
                         Bool(lhs.lt(&rhs)),
+                    (Operator::LessOrEqual, Number(lhs), Number(rhs)) =>
+                        Bool(lhs.le(&rhs)),
+                    (Operator::Greater, Number(lhs), Number(rhs)) =>
+                        Bool(lhs.gt(&rhs)),
+                    (Operator::GreaterOrEqual, Number(lhs), Number(rhs)) =>
+                        Bool(lhs.ge(&rhs)),
 
                     (operator, lhs, rhs) =>
                         return Err(Error {
