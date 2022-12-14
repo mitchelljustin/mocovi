@@ -1,7 +1,9 @@
 use std::fmt::{Debug, Display, Formatter};
+use std::mem::MaybeUninit;
 
 use pest::iterators::{Pair, Pairs};
 use pest_derive::*;
+
 
 #[derive(Parser)]
 #[grammar = "mocovi.pest"]
@@ -38,7 +40,7 @@ impl Display for SyntaxNode {
 }
 
 impl SyntaxNode {
-    pub fn new(pair: &Pair<'_, Rule>, kind: NodeKind) -> Self {
+    pub fn new(pair: &Pair<Rule>, kind: NodeKind) -> Self {
         Self {
             line_col: pair.as_span().start_pos().line_col(),
             source: pair.as_str().to_string(),
@@ -47,10 +49,27 @@ impl SyntaxNode {
     }
 }
 
+
+trait IntoArray<T, const N: usize> {
+    fn into_array(self) -> [T; N];
+}
+
+impl<I, T, const N: usize> IntoArray<Option<T>, N> for I
+    where I: IntoIterator<Item=T> {
+    fn into_array(self) -> [Option<T>; N] {
+        let mut iter = self.into_iter();
+        let mut array = MaybeUninit::uninit_array();
+        for dst in &mut array {
+            dst.write(iter.next());
+        }
+        unsafe { array.transpose().assume_init() }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum NodeKind {
     // top-level statement
-    Program { body: Vec<SyntaxNode> },
+    Sequence { body: Vec<SyntaxNode> },
 
     // compound statements
     IfStmt { condition: Box<SyntaxNode>, then_body: Vec<SyntaxNode>, else_body: Vec<SyntaxNode> },
@@ -86,14 +105,20 @@ impl Display for NodeKind {
     }
 }
 
-fn collect_sequence(pair: Option<Pair<Rule>>) -> Vec<SyntaxNode> {
-    match pair {
-        Some(elements) => elements
-            .into_inner()
-            .filter(|sub_pair| !sub_pair.as_str().trim().is_empty())
-            .map(SyntaxNode::from)
-            .collect(),
-        None => Vec::new(),
+trait PairsExt {
+    fn next_stmts(&mut self) -> Vec<SyntaxNode>;
+}
+
+impl PairsExt for Pairs<'_, Rule> {
+    fn next_stmts(&mut self) -> Vec<SyntaxNode> {
+        match self.next() {
+            Some(elements) => elements
+                .into_inner()
+                .filter(|stmt| !stmt.as_str().trim().is_empty())
+                .map(SyntaxNode::from)
+                .collect(),
+            None => Vec::new(),
+        }
     }
 }
 
@@ -108,8 +133,8 @@ fn collect_func_sig(inner: &mut Pairs<Rule>) -> (String, Vec<String>) {
 
 impl From<Pair<'_, Rule>> for SyntaxNode {
     fn from(pair: Pair<Rule>) -> Self {
-        let mut inner = pair.clone().into_inner();
         let rule = pair.as_rule();
+        let mut inner = pair.clone().into_inner();
         match rule {
             Rule::expr |
             Rule::grouping |
@@ -118,17 +143,20 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
             Rule::compound_stmt |
             Rule::primary =>
                 inner.next().unwrap().into(),
-            Rule::program => {
-                let body = collect_sequence(inner.next());
+
+            Rule::program |
+            Rule::do_end => {
+                let body = inner.next_stmts();
                 SyntaxNode::new(
                     &pair,
-                    NodeKind::Program { body },
+                    NodeKind::Sequence { body },
                 )
             }
+
             Rule::if_stmt => {
                 let condition = Box::new(inner.next().unwrap().into());
-                let then_body = collect_sequence(inner.next());
-                let else_body = collect_sequence(inner.next());
+                let then_body = inner.next_stmts();
+                let else_body = inner.next_stmts();
                 SyntaxNode::new(
                     &pair,
                     NodeKind::IfStmt {
@@ -140,7 +168,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
             }
             Rule::while_stmt => {
                 let condition = Box::new(inner.next().unwrap().into());
-                let body = collect_sequence(inner.next());
+                let body = inner.next_stmts();
                 SyntaxNode::new(
                     &pair,
                     NodeKind::WhileStmt { condition, body },
@@ -149,7 +177,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
             Rule::for_stmt => {
                 let target = inner.next().unwrap().as_str().to_string();
                 let iterator = Box::new(inner.next().unwrap().into());
-                let body = collect_sequence(inner.next());
+                let body = inner.next_stmts();
                 SyntaxNode::new(
                     &pair,
                     NodeKind::ForStmt { target, iterator, body },
@@ -202,7 +230,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
             }
             Rule::func_def => {
                 let (name, params) = collect_func_sig(&mut inner);
-                let body = collect_sequence(inner.next());
+                let body = inner.next_stmts();
                 SyntaxNode::new(
                     &pair,
                     NodeKind::FuncDef {

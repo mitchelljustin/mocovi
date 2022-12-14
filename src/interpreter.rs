@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
+use std::fs;
 use std::ops::{Add, Div, Mul, Sub};
+use std::path::Path;
 
 use pest::Parser;
 
@@ -41,22 +43,12 @@ pub enum Value {
     #[default]
     Nil,
 
-    Object(Object),
     Number(f64),
     String(String),
     Bool(bool),
     Function(Function),
     Array(Vec<Value>),
     Dict(HashMap<String, Value>),
-}
-
-#[derive(Clone, Debug)]
-pub struct Id(usize);
-
-#[derive(Clone, Debug)]
-pub struct Object {
-    class: Id,
-
 }
 
 impl Value {
@@ -114,7 +106,7 @@ impl Value {
 
 
 pub struct Interpreter {
-    scopes: Vec<HashMap<String, Value>>,
+    scope_stack: Vec<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -162,7 +154,7 @@ fn expect_arity(func_name: &str, expected: usize, actual: usize) -> Result<(), E
 impl Interpreter {
     pub fn new() -> Self {
         let mut me = Self {
-            scopes: vec![Default::default()],
+            scope_stack: vec![Default::default()],
         };
         me.init();
         me
@@ -195,11 +187,11 @@ impl Interpreter {
     }
 
     fn assign(&mut self, name: String, value: Value) {
-        self.scopes.first_mut().unwrap().insert(name, value);
+        self.scope_stack.first_mut().unwrap().insert(name, value);
     }
 
     fn retrieve(&self, name: &str) -> Option<&Value> {
-        for scope in self.scopes.iter() {
+        for scope in self.scope_stack.iter() {
             let Some(value) = scope.get(name) else {
                 continue;
             };
@@ -209,11 +201,11 @@ impl Interpreter {
     }
 
     fn push_scope(&mut self) {
-        self.scopes.insert(0, HashMap::new());
+        self.scope_stack.insert(0, HashMap::new());
     }
 
     fn pop_scope(&mut self) {
-        self.scopes.remove(0);
+        self.scope_stack.remove(0);
     }
 
     fn eval_seq(&mut self, stmts: impl IntoIterator<Item=SyntaxNode>) -> Result<Value, Error> {
@@ -224,8 +216,14 @@ impl Interpreter {
         Ok(result)
     }
 
-    pub fn eval_source(&mut self, source: &str) -> Result<Value, Box<dyn std::error::Error>> {
-        let Some(top_level_pair) = MocoviParser::parse(Rule::program, source)?.next() else {
+    pub fn eval_file(&mut self, path: impl AsRef<Path>) -> Result<Value, Box<dyn std::error::Error>> {
+        let source = fs::read_to_string(path)?;
+        self.eval_source(source)
+    }
+
+    pub fn eval_source(&mut self, mut source: String) -> Result<Value, Box<dyn std::error::Error>> {
+        source.push('\n');
+        let Some(top_level_pair) = MocoviParser::parse(Rule::program, &source)?.next() else {
             unreachable!();
         };
         let node = SyntaxNode::from(top_level_pair);
@@ -235,7 +233,7 @@ impl Interpreter {
     pub fn eval(&mut self, node: SyntaxNode) -> Result<Value, Error> {
         let result = match node.kind.clone() {
             // statements
-            NodeKind::Program { body } => {
+            NodeKind::Sequence { body } => {
                 self.eval_seq(body)?
             }
             NodeKind::Assignment { target, value } => {
@@ -392,8 +390,10 @@ impl Interpreter {
                 }
                 for stmt in statements {
                     result = match &stmt.kind {
-                        NodeKind::Return { retval } =>
-                            return self.eval(*retval.clone()),
+                        NodeKind::Return { retval } => {
+                            result = self.eval(*retval.clone())?;
+                            break;
+                        }
                         _ =>
                             self.eval(stmt)?,
                     };

@@ -122,7 +122,14 @@ primary = {
     grouping |
     array |
     dict |
+    do_end |
     ident
+}
+
+do_end = {
+    "do" ~ NEWLINE ~
+    stmts? ~
+    "end"
 }
 
 grouping = { "(" ~ expr ~ ")" }
