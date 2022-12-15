@@ -7,20 +7,22 @@
 #![feature(maybe_uninit_uninit_array_transpose)]
 #![feature(array_methods)]
 
+extern crate core;
+
 use std::error::Error;
 use std::io::{BufRead, stdin, stdout, Write};
 
 use ansi_term::Color::{Green, Red};
 
-use crate::interpreter::{Interpreter, Value};
+use crate::interpreter::{builtin, Interpreter, RustValue};
 
 mod parser;
 mod interpreter;
 
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut interpreter = Interpreter::new();
-    interpreter.eval_file("./example/lib.rb")?;
+    let mut env = Interpreter::new();
+    env.eval_file("./example/lib.rb")?;
     let mut stdout = stdout();
     print!(">> ");
     stdout.flush()?;
@@ -49,12 +51,31 @@ fn main() -> Result<(), Box<dyn Error>> {
             continue;
         }
         let source = chunk.split_off(0);
-        match interpreter.eval_source(source) {
-            Ok(Value::Nil) => {}
-            Ok(result) =>
-                println!("=> {}", Green.paint(result.to_s())),
-            Err(error) =>
+        match env.eval_source(source) {
+            Ok(builtin::nil) => {}
+            Ok(result) => {
+                let repr = env.call_method(
+                    None,
+                    result,
+                    "__repr__",
+                    &[],
+                );
+                if let Ok(repr_id) = repr {
+                    let obj = repr_id.get(&env);
+                    let class = obj.class.get(&env);
+                    let string =
+                        if class.id == builtin::String {
+                            let RustValue::String(inner_string) = &obj.underlying else {
+                                unreachable!();
+                            };
+                            inner_string.clone()
+                        } else { "???".to_string() };
+                    println!("=> {}", Green.paint(string));
+                };
+            }
+            Err(error) => {
                 eprintln!("{}", Red.paint(error.to_string()))
+            }
         }
         print!(">> ");
         stdout.flush()?;

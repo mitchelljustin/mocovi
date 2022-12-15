@@ -6,97 +6,102 @@ use std::path::Path;
 
 use pest::Parser;
 
-use Value::{Bool, Dict, Nil, Number};
+use builtin::nil;
 
-use crate::interpreter::ErrorKind::{ArityError, NameNotFound, SyntaxError, TypeError};
-use crate::interpreter::Value::Array;
-use crate::parser::{MocoviParser, NodeKind, Operator, Rule, SyntaxNode};
+use crate::interpreter::ErrorKind::{MethodNotFound, NameNotFound, SyntaxError, TypeError};
+use crate::interpreter::RustValue::{F64};
+use crate::parser::{MocoviParser, NodeKind, Rule, SyntaxNode};
+
+#[derive(Clone, Debug, Default)]
+pub enum RustValue {
+    #[default]
+    Nil,
+
+    F64(f64),
+    String(String),
+    Bool(bool),
+    Vec(Vec<ObjectId>),
+    HashMap(HashMap<String, ObjectId>),
+}
+
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
+pub struct ObjectId(usize);
+
+impl ObjectId {
+    pub fn get<'a>(&self, env: &'a Interpreter) -> &'a Object {
+        &env.objects[self.0]
+    }
+
+    pub fn get_mut<'a>(&self, env: &'a mut Interpreter) -> &'a mut Object {
+        &mut env.objects[self.0]
+    }
+
+    pub fn class<'a>(&self, env: &'a Interpreter) -> &'a Class {
+        self.get(env).class.get(env)
+    }
+
+    pub fn class_mut<'a>(&self, env: &'a mut Interpreter) -> &'a mut Class {
+        self.get(env).class.clone().get_mut(env)
+    }
+}
+
+#[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
+pub struct ClassId(usize);
+
+impl ClassId {
+    pub fn get<'a>(&self, env: &'a Interpreter) -> &'a Class {
+        &env.classes[self.0]
+    }
+
+    pub fn get_mut<'a>(&self, env: &'a mut Interpreter) -> &'a mut Class {
+        &mut env.classes[self.0]
+    }
+}
 
 #[derive(Clone, Debug)]
-pub struct Function {
-    name: String,
-    params: Vec<String>,
-    body: FunctionBody,
+pub struct Object {
+    pub id: ObjectId,
+    pub class: ClassId,
+    pub underlying: RustValue,
+    pub properties: HashMap<String, ObjectId>,
 }
 
-type BuiltinFunction = fn(&mut Interpreter, Vec<Value>) -> Result<Value, Error>;
+#[derive(Clone, Debug)]
+pub struct Class {
+    pub id: ClassId,
+    pub name: String,
+    pub methods: HashMap<String, Method>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Method {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: MethodBody,
+}
+
+pub type MethodFunction = fn(&mut Interpreter, ObjectId, &[ObjectId]) -> ObjectId;
 
 #[derive(Clone)]
-pub enum FunctionBody {
-    Builtin(BuiltinFunction),
+pub enum MethodBody {
     User(Vec<SyntaxNode>),
+    Builtin(MethodFunction),
 }
 
-impl Debug for FunctionBody {
+impl Debug for MethodBody {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            FunctionBody::User(body) =>
+            MethodBody::User(body) =>
                 f.debug_list().entries(body).finish(),
-            FunctionBody::Builtin(_) =>
+            MethodBody::Builtin(_) =>
                 write!(f, "<builtin>"),
         }
     }
 }
 
-#[derive(Clone, Debug, Default)]
-pub enum Value {
-    #[default]
-    Nil,
-
-    Number(f64),
-    String(String),
-    Bool(bool),
-    Function(Function),
-    Array(Vec<Value>),
-    Dict(HashMap<String, Value>),
-}
-
-impl Value {
-    pub fn to_s(&self) -> String {
-        match self {
-            Number(v) =>
-                v.to_string(),
-            Value::String(s) =>
-                format!("\"{s}\""),
-            Bool(b) =>
-                b.to_string(),
-            Value::Function(f) =>
-                format!("{}({})", f.name, f.params.join(", ")),
-            Nil =>
-                "nil".to_string(),
-            Array(elements) =>
-                format!("[{}]", elements.iter()
-                    .map(Self::to_s)
-                    .intersperse(", ".to_string())
-                    .collect::<String>()),
-            Dict(entries) =>
-                format!("[{}]",
-                        if entries.is_empty() {
-                            ":".to_string()
-                        } else {
-                            entries
-                                .iter()
-                                .map(|(k, v)| format!("\"{k}\": {}", v.to_s()))
-                                .intersperse(", ".to_string())
-                                .collect::<String>()
-                        }),
-        }
-    }
-
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            Number(_) => "Number",
-            Value::String(_) => "String",
-            Bool(_) => "Bool",
-            Value::Function(_) => "Function",
-            Nil => "Nil",
-            Array(_) => "Array",
-            Dict(_) => "Dict"
-        }
-    }
-
+impl Object {
     pub fn is_falsy(&self) -> bool {
-        matches!(self, Value::Bool(false) | Value::Nil)
+        matches!(self.underlying, RustValue::Bool(false) | RustValue::Nil)
     }
 
     pub fn is_truthy(&self) -> bool {
@@ -106,7 +111,12 @@ impl Value {
 
 
 pub struct Interpreter {
-    scope_stack: Vec<HashMap<String, Value>>,
+    scope_stack: Vec<HashMap<String, ObjectId>>,
+    class_stack: Vec<ClassId>,
+    objects: Vec<Object>,
+    classes: Vec<Class>,
+    class_by_name: HashMap<String, ClassId>,
+    current_self: ObjectId,
 }
 
 #[derive(Debug, Clone)]
@@ -129,75 +139,149 @@ impl std::error::Error for Error {}
 #[derive(Debug, Clone)]
 pub enum ErrorKind {
     NameNotFound,
+    MethodNotFound,
     TypeError,
     SyntaxError,
     ArityError,
 }
 
 impl Display for ErrorKind {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         Debug::fmt(self, f)
     }
 }
 
-fn expect_arity(func_name: &str, expected: usize, actual: usize) -> Result<(), Error> {
-    if expected != actual {
-        return Err(Error {
-            kind: ArityError,
-            loc: "???".to_string(),
-            msg: format!("function '{func_name}' expected {expected} arguments, got {actual}"),
-        });
-    }
-    Ok(())
+#[allow(non_upper_case_globals)]
+pub mod builtin {
+    use crate::interpreter::{ClassId, ObjectId};
+
+    pub const CLASS_NAMES: &[&str] = &[
+        "Nil",
+        "Number",
+        "String",
+        "Bool",
+        "Array",
+        "Dict",
+        "Main",
+    ];
+
+    pub const Nil: ClassId = ClassId(0);
+    pub const Number: ClassId = ClassId(1);
+    pub const String: ClassId = ClassId(2);
+    pub const Bool: ClassId = ClassId(3);
+    pub const Array: ClassId = ClassId(4);
+    pub const Dict: ClassId = ClassId(5);
+
+    pub const Main: ClassId = ClassId(6);
+
+    pub const nil: ObjectId = ObjectId(0);
+    pub const main: ObjectId = ObjectId(1);
 }
 
 impl Interpreter {
     pub fn new() -> Self {
         let mut me = Self {
-            scope_stack: vec![Default::default()],
+            scope_stack: Vec::new(),
+            class_stack: Vec::new(),
+            objects: Vec::new(),
+            classes: Vec::new(),
+            class_by_name: HashMap::new(),
+            current_self: builtin::main,
         };
         me.init();
         me
     }
 
+    pub fn create_class(&mut self, name: String) -> ClassId {
+        let id = ClassId(self.classes.len());
+        self.class_by_name.insert(name.clone(), id);
+        self.classes.push(Class {
+            id,
+            name,
+            methods: Default::default(),
+        });
+        id
+    }
+
+    pub fn create_object_with_underlying(&mut self, class: ClassId, underlying: RustValue) -> ObjectId {
+        let id = ObjectId(self.objects.len());
+        self.objects.push(Object {
+            id,
+            class,
+            underlying,
+            properties: Default::default(),
+        });
+        id
+    }
+
+    pub fn create_object(&mut self, class: ClassId) -> ObjectId {
+        self.create_object_with_underlying(class, RustValue::Nil)
+    }
+
+
     pub fn init(&mut self) {
-        self.define_builtin("print", [], |_, args| {
-            println!("{}", args
-                .into_iter()
-                .map(|n| match n {
-                    Value::String(string) => string,
-                    not_string => not_string.to_s(),
-                })
-                .intersperse(" ".to_string())
-                .collect::<String>());
-            Ok(Nil)
-        });
-        self.define_builtin("type", ["obj"], |_, args| {
-            expect_arity("type", 1, args.len())?;
-            Ok(Value::String(args[0].type_name().to_string()))
-        });
+        self.scope_stack.push(Default::default());
+        for class_name in builtin::CLASS_NAMES {
+            self.create_class(class_name.to_string());
+        }
+        self.create_object_with_underlying(builtin::Nil, RustValue::Nil);
+        self.create_object(builtin::Main);
+        self.class_stack.insert(0, builtin::Main);
+        self.define_method_on(
+            builtin::Number,
+            Method {
+                name: "__add__".to_string(),
+                params: vec!["rhs".to_string()],
+                body: MethodBody::Builtin(|env, lhs, args| {
+                    let &[rhs] = args else {
+                        return nil; // TODO: error
+                    };
+                    let [F64(lhs), F64(rhs)] = [lhs, rhs].map(|x| x.get(env).underlying.clone()) else {
+                        return nil;
+                    };
+                    env.create_object_with_underlying(builtin::Number, F64(lhs.add(rhs)))
+                }),
+            },
+        );
+        self.define_method_on(
+            builtin::Number,
+            Method {
+                name: "__repr__".to_string(),
+                params: vec![],
+                body: MethodBody::Builtin(|env, this, _| {
+                    let F64(value) = this.get(env).underlying else {
+                        return nil; //TODO: error
+                    };
+                    env.create_object_with_underlying(builtin::String, RustValue::String(value.to_string()))
+                }),
+            },
+        );
     }
 
-    fn define_builtin<const N: usize>(&mut self, name: &str, params: [&str; N], function: BuiltinFunction) {
-        self.assign(name.to_string(), Value::Function(Function {
-            name: name.to_string(),
-            params: params.map(ToString::to_string).to_vec(),
-            body: FunctionBody::Builtin(function),
-        }));
+    fn assign(&mut self, name: String, object: ObjectId) {
+        self.scope_stack.first_mut().unwrap().insert(name, object);
     }
 
-    fn assign(&mut self, name: String, value: Value) {
-        self.scope_stack.first_mut().unwrap().insert(name, value);
-    }
-
-    fn retrieve(&self, name: &str) -> Option<&Value> {
+    fn retrieve(&self, name: &str) -> Option<ObjectId> {
         for scope in self.scope_stack.iter() {
-            let Some(value) = scope.get(name) else {
+            let Some(value) = scope.get(name).cloned() else {
                 continue;
             };
             return Some(value);
         }
         None
+    }
+
+    fn define_method_on(&mut self, class: ClassId, method: Method) {
+        let class = class.get_mut(self);
+        class.methods.insert(method.name.clone(), method);
+    }
+
+    fn define_method(&mut self, method: Method) {
+        self.define_method_on(
+            *self.class_stack.first().unwrap(),
+            method,
+        );
     }
 
     fn push_scope(&mut self) {
@@ -208,20 +292,20 @@ impl Interpreter {
         self.scope_stack.remove(0);
     }
 
-    fn eval_seq(&mut self, stmts: impl IntoIterator<Item=SyntaxNode>) -> Result<Value, Error> {
-        let mut result = Nil;
+    fn eval_seq(&mut self, stmts: impl IntoIterator<Item=SyntaxNode>) -> Result<ObjectId, Error> {
+        let mut result = nil;
         for stmt in stmts {
             result = self.eval(stmt)?;
         }
         Ok(result)
     }
 
-    pub fn eval_file(&mut self, path: impl AsRef<Path>) -> Result<Value, Box<dyn std::error::Error>> {
+    pub fn eval_file(&mut self, path: impl AsRef<Path>) -> Result<ObjectId, Box<dyn std::error::Error>> {
         let source = fs::read_to_string(path)?;
         self.eval_source(source)
     }
 
-    pub fn eval_source(&mut self, mut source: String) -> Result<Value, Box<dyn std::error::Error>> {
+    pub fn eval_source(&mut self, mut source: String) -> Result<ObjectId, Box<dyn std::error::Error>> {
         source.push('\n');
         let Some(top_level_pair) = MocoviParser::parse(Rule::program, &source)?.next() else {
             unreachable!();
@@ -230,7 +314,7 @@ impl Interpreter {
         self.eval(node).map_err(Into::into)
     }
 
-    pub fn eval(&mut self, node: SyntaxNode) -> Result<Value, Error> {
+    pub fn eval(&mut self, node: SyntaxNode) -> Result<ObjectId, Error> {
         let result = match node.kind.clone() {
             // statements
             NodeKind::Sequence { body } => {
@@ -239,26 +323,30 @@ impl Interpreter {
             NodeKind::Assignment { target, value } => {
                 let value = self.eval(*value)?;
                 self.assign(target, value);
-                Nil
+                nil
             }
             NodeKind::IfStmt { condition, then_body, else_body } => {
-                let branch = if self.eval(*condition)?.is_truthy() { then_body } else { else_body };
+                let ObjectId(condition) = self.eval(*condition)?;
+                let branch = if self.objects[condition].is_truthy() { then_body } else { else_body };
                 self.eval_seq(branch)?
             }
             NodeKind::WhileStmt { condition, body } => {
-                while self.eval(*condition.clone())?.is_truthy() {
+                while self.eval(*condition.clone())?.get(self).is_truthy() {
                     self.eval_seq(body.clone())?;
                 }
-                Nil
+                nil
             }
             NodeKind::ForStmt { target, iterator, body } => {
-                let live_iterator = self.eval(*iterator.clone())?;
-                let Array(elements) = live_iterator else {
+                let live_iterator = self.eval(*iterator.clone())?.get(self);
+                if live_iterator.class != builtin::Array {
                     return Err(Error {
                         kind: TypeError,
                         loc: iterator.to_string(),
-                        msg: format!("for..in expected Array type, got {}", live_iterator.type_name()),
+                        msg: format!("for..in expected Array type"),
                     });
+                }
+                let RustValue::Vec(elements) = live_iterator.underlying.clone() else {
+                    unreachable!();
                 };
                 self.push_scope();
                 for item in elements {
@@ -266,106 +354,60 @@ impl Interpreter {
                     self.eval_seq(body.clone())?;
                 }
                 self.pop_scope();
-                Nil
+                nil
             }
             NodeKind::FuncDef { name, params, body } => {
-                self.assign(name.clone(), Value::Function(Function {
+                self.define_method(Method {
                     name,
                     params,
-                    body: FunctionBody::User(body),
-                }));
-                Nil
+                    body: MethodBody::User(body),
+                });
+                nil
             }
             NodeKind::BinaryExpr { lhs, operator, rhs } => {
                 let lhs = self.eval(*lhs)?;
                 let rhs = self.eval(*rhs)?;
-                match (operator, lhs, rhs) {
-                    (Operator::Add, Value::String(lhs), Value::String(rhs)) =>
-                        Value::String(lhs.add(&rhs)),
-                    (Operator::Mul, Value::String(string), Number(n)) =>
-                        Value::String(string.repeat(n as _)),
-
-                    (Operator::Add, Number(lhs), Number(rhs)) =>
-                        Number(lhs.add(rhs)),
-                    (Operator::Sub, Number(lhs), Number(rhs)) =>
-                        Number(lhs.sub(rhs)),
-                    (Operator::Mul, Number(lhs), Number(rhs)) =>
-                        Number(lhs.mul(rhs)),
-                    (Operator::Div, Number(lhs), Number(rhs)) =>
-                        Number(lhs.div(rhs)),
-
-                    (Operator::Equal, Number(lhs), Number(rhs)) =>
-                        Bool(lhs.eq(&rhs)),
-                    (Operator::NotEqual, Number(lhs), Number(rhs)) =>
-                        Bool(lhs.ne(&rhs)),
-                    (Operator::Less, Number(lhs), Number(rhs)) =>
-                        Bool(lhs.lt(&rhs)),
-                    (Operator::LessOrEqual, Number(lhs), Number(rhs)) =>
-                        Bool(lhs.le(&rhs)),
-                    (Operator::Greater, Number(lhs), Number(rhs)) =>
-                        Bool(lhs.gt(&rhs)),
-                    (Operator::GreaterOrEqual, Number(lhs), Number(rhs)) =>
-                        Bool(lhs.ge(&rhs)),
-
-                    (operator, lhs, rhs) =>
-                        return Err(Error {
-                            kind: TypeError,
-                            loc: node.to_string(),
-                            msg: format!("unsupported operator '{}' for {} and {}", <&str>::from(operator), lhs.type_name(), rhs.type_name()),
-                        })
-                }
+                let method_name = operator.method_name();
+                self.call_method(
+                    Some(&node),
+                    lhs,
+                    method_name,
+                    &[rhs],
+                )?
             }
             NodeKind::Call { target, args } => {
-                let func = match self.retrieve(&target) {
-                    Some(Value::Function(f)) => f.clone(),
-                    Some(not_a_function) =>
-                        return Err(Error {
-                            kind: TypeError,
-                            loc: node.to_string(),
-                            msg: format!("expected Function, got {}", not_a_function.type_name()),
-                        }),
-                    None =>
-                        return Err(Error {
-                            kind: NameNotFound,
-                            loc: node.to_string(),
-                            msg: format!("no such function: '{target}'"),
-                        }),
-                };
-                self.finish_call(func, args)?
-            }
-            NodeKind::Reference { name } =>
-                match self.retrieve(&name) {
-                    Some(value) => value.clone(),
-                    None => return Err(Error {
-                        kind: NameNotFound,
-                        loc: node.to_string(),
-                        msg: format!("name '{name}' is not defined"),
-                    })
-                },
-            NodeKind::StringLiteral { value } =>
-                Value::String(value),
-            NodeKind::NumberLiteral { value } =>
-                Number(value),
-            NodeKind::BooleanLiteral { value } =>
-                Bool(value),
-            NodeKind::ArrayLiteral { elements } => {
-                let elements = elements
+                let args = args
                     .into_iter()
                     .map(|node| self.eval(node))
-                    .collect::<Result<_, _>>()?;
-                Array(elements)
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.call_method(
+                    Some(&node),
+                    self.current_self,
+                    &target,
+                    &args,
+                )?
+            }
+            NodeKind::Reference { name } =>
+                self.retrieve(&name).ok_or(Error {
+                    kind: NameNotFound,
+                    loc: node.to_string(),
+                    msg: format!("name '{name}' is not defined"),
+                })?,
+            NodeKind::StringLiteral { value } =>
+                nil,
+            NodeKind::NumberLiteral { value } =>
+                self.create_object_with_underlying(builtin::Number, F64(value)),
+            NodeKind::BooleanLiteral { value } =>
+                nil,
+            NodeKind::ArrayLiteral { elements } => {
+                nil
             }
             NodeKind::DictLiteral { entries } => {
-                let mut live_entries = HashMap::new();
-                for (key, value) in entries {
-                    let value = self.eval(value)?;
-                    live_entries.insert(key, value);
-                }
-                Dict(live_entries)
+                nil
             }
 
             NodeKind::NilLiteral =>
-                Nil,
+                nil,
             NodeKind::Return { .. } =>
                 return Err(Error {
                     kind: SyntaxError,
@@ -376,35 +418,46 @@ impl Interpreter {
         Ok(result)
     }
 
-    fn finish_call(&mut self, Function { params, body, .. }: Function, args: Vec<SyntaxNode>) -> Result<Value, Error> {
-        let mut result = Nil;
-        let args = args
-            .into_iter()
-            .map(|node| self.eval(node))
-            .collect::<Result<_, _>>()?;
-        match body {
-            FunctionBody::User(statements) => {
+    pub fn call_method(&mut self,
+                       node: Option<&SyntaxNode>,
+                       receiver: ObjectId,
+                       method_name: &str,
+                       args: &[ObjectId]) -> Result<ObjectId, Error> {
+        let class = receiver.class(self);
+        let method = class.methods
+            .get(method_name)
+            .ok_or(Error {
+                kind: MethodNotFound,
+                loc: node.map_or("???".to_string(), ToString::to_string),
+                msg: format!("could not find method '{method_name}' on class '{}'", class.name),
+            })?
+            .clone();
+        let result = match method.body {
+            MethodBody::User(body) => {
                 self.push_scope();
-                for (param, arg) in params.into_iter().zip(args) {
-                    self.assign(param, arg);
+                self.assign("self".to_string(), receiver);
+                for (param, arg) in method.params.into_iter().zip(args) {
+                    self.assign(param, *arg);
                 }
-                for stmt in statements {
-                    result = match &stmt.kind {
+                self.pop_scope();
+                let mut result = nil;
+                for stmt in body {
+                    match &stmt.kind {
                         NodeKind::Return { retval } => {
                             result = self.eval(*retval.clone())?;
                             break;
                         }
-                        _ =>
-                            self.eval(stmt)?,
+                        _ => {
+                            result = self.eval(stmt.clone())?;
+                        }
                     };
                 }
-                self.pop_scope();
+                result
             }
-            FunctionBody::Builtin(function) => {
-                result = function(self, args)?;
+            MethodBody::Builtin(function) => {
+                function(self, receiver, &args)
             }
-        }
-
+        };
         Ok(result)
     }
 }
