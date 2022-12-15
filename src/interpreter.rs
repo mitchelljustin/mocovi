@@ -9,13 +9,13 @@ use pest::Parser;
 use builtin::nil;
 
 use crate::interpreter::ErrorKind::{MethodNotFound, NameNotFound, SyntaxError, TypeError};
-use crate::interpreter::RustValue::{F64};
+use crate::interpreter::RustValue::F64;
 use crate::parser::{MocoviParser, NodeKind, Rule, SyntaxNode};
 
 #[derive(Clone, Debug, Default)]
 pub enum RustValue {
     #[default]
-    Nil,
+    None,
 
     F64(f64),
     String(String),
@@ -80,7 +80,7 @@ pub struct Method {
     pub body: MethodBody,
 }
 
-pub type MethodFunction = fn(&mut Interpreter, ObjectId, &[ObjectId]) -> ObjectId;
+pub type MethodFunction = fn(&mut Interpreter, ObjectId, &str, &[ObjectId]) -> ObjectId;
 
 #[derive(Clone)]
 pub enum MethodBody {
@@ -101,7 +101,7 @@ impl Debug for MethodBody {
 
 impl Object {
     pub fn is_falsy(&self) -> bool {
-        matches!(self.underlying, RustValue::Bool(false) | RustValue::Nil)
+        matches!(self.underlying, RustValue::Bool(false) | RustValue::None)
     }
 
     pub fn is_truthy(&self) -> bool {
@@ -215,7 +215,7 @@ impl Interpreter {
     }
 
     pub fn create_object(&mut self, class: ClassId) -> ObjectId {
-        self.create_object_with_underlying(class, RustValue::Nil)
+        self.create_object_with_underlying(class, Default::default())
     }
 
 
@@ -224,22 +224,49 @@ impl Interpreter {
         for class_name in builtin::CLASS_NAMES {
             self.create_class(class_name.to_string());
         }
-        self.create_object_with_underlying(builtin::Nil, RustValue::Nil);
+        self.create_object_with_underlying(builtin::Nil, RustValue::None);
         self.create_object(builtin::Main);
         self.class_stack.insert(0, builtin::Main);
+        for name in ["__add__", "__sub__", "__mul__", "__div__"] {
+            self.define_method_on(
+                builtin::Number,
+                Method {
+                    name: name.to_string(),
+                    params: vec!["rhs".to_string()],
+                    body: MethodBody::Builtin(|env, this, method, args| {
+                        let &[rhs] = args else {
+                            return nil; // TODO: error
+                        };
+                        let [F64(lhs), F64(rhs)] = [this, rhs].map(|x| x.get(env).underlying.clone()) else {
+                            return nil;
+                        };
+                        let op = match method {
+                            "__add__" => Add::add,
+                            "__sub__" => Sub::sub,
+                            "__mul__" => Mul::mul,
+                            "__div__" => Div::div,
+                            _ => unreachable!(),
+                        };
+                        let result = op(lhs, rhs);
+                        env.create_object_with_underlying(builtin::Number, F64(result))
+                    }),
+                },
+            );
+        }
         self.define_method_on(
-            builtin::Number,
+            builtin::String,
             Method {
                 name: "__add__".to_string(),
                 params: vec!["rhs".to_string()],
-                body: MethodBody::Builtin(|env, lhs, args| {
+                body: MethodBody::Builtin(|env, this, _, args| {
                     let &[rhs] = args else {
                         return nil; // TODO: error
                     };
-                    let [F64(lhs), F64(rhs)] = [lhs, rhs].map(|x| x.get(env).underlying.clone()) else {
+                    let [RustValue::String(lhs), RustValue::String(rhs)] = [this, rhs].map(|x| x.get(env).underlying.clone()) else {
                         return nil;
                     };
-                    env.create_object_with_underlying(builtin::Number, F64(lhs.add(rhs)))
+                    let result = lhs + &rhs;
+                    env.create_object_with_underlying(builtin::String, RustValue::String(result))
                 }),
             },
         );
@@ -248,11 +275,25 @@ impl Interpreter {
             Method {
                 name: "__repr__".to_string(),
                 params: vec![],
-                body: MethodBody::Builtin(|env, this, _| {
+                body: MethodBody::Builtin(|env, this, _, _| {
                     let F64(value) = this.get(env).underlying else {
                         return nil; //TODO: error
                     };
                     env.create_object_with_underlying(builtin::String, RustValue::String(value.to_string()))
+                }),
+            },
+        );
+        self.define_method_on(
+            builtin::String,
+            Method {
+                name: "__repr__".to_string(),
+                params: vec![],
+                body: MethodBody::Builtin(|env, this, _, _| {
+                    let RustValue::String(value) = &this.get(env).underlying else {
+                        return nil; //TODO: error
+                    };
+                    let repr = format!("\"{value}\"");
+                    env.create_object_with_underlying(builtin::String, RustValue::String(repr))
                 }),
             },
         );
@@ -394,16 +435,25 @@ impl Interpreter {
                     msg: format!("name '{name}' is not defined"),
                 })?,
             NodeKind::StringLiteral { value } =>
-                nil,
+                self.create_object_with_underlying(builtin::String, RustValue::String(value)),
             NodeKind::NumberLiteral { value } =>
                 self.create_object_with_underlying(builtin::Number, F64(value)),
             NodeKind::BooleanLiteral { value } =>
-                nil,
+                self.create_object_with_underlying(builtin::Bool, RustValue::Bool(value)),
             NodeKind::ArrayLiteral { elements } => {
-                nil
+                let array = elements
+                    .into_iter()
+                    .map(|el| self.eval(el))
+                    .collect::<Result<_, _>>()?;
+                self.create_object_with_underlying(builtin::Array, RustValue::Vec(array))
             }
             NodeKind::DictLiteral { entries } => {
-                nil
+                let mut dict = HashMap::new();
+                for (key, value) in entries {
+                    let value = self.eval(value)?;
+                    dict.insert(key, value);
+                }
+                self.create_object_with_underlying(builtin::Dict, RustValue::HashMap(dict))
             }
 
             NodeKind::NilLiteral =>
@@ -439,7 +489,6 @@ impl Interpreter {
                 for (param, arg) in method.params.into_iter().zip(args) {
                     self.assign(param, *arg);
                 }
-                self.pop_scope();
                 let mut result = nil;
                 for stmt in body {
                     match &stmt.kind {
@@ -452,10 +501,11 @@ impl Interpreter {
                         }
                     };
                 }
+                self.pop_scope();
                 result
             }
             MethodBody::Builtin(function) => {
-                function(self, receiver, &args)
+                function(self, receiver, method_name, args)
             }
         };
         Ok(result)
