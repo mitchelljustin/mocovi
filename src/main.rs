@@ -10,7 +10,7 @@
 extern crate core;
 
 use std::error::Error;
-use std::io::{BufRead, stdin, stdout, Write};
+use std::io::{BufRead, stderr, stdin, stdout, Write};
 
 use ansi_term::Color::{Green, Red};
 
@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 };
             }
             Err(error) => {
-                eprintln!("{}", Red.paint(error.to_string()))
+                eprintln!("{}", Red.paint(error.to_string()));
             }
         }
         print!(">> ");

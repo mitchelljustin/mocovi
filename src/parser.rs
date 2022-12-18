@@ -314,24 +314,6 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
     }
 }
 
-impl Operator {
-    pub(crate) fn method_name(&self) -> &str {
-        match self {
-            Operator::BoolAnd => "__and__",
-            Operator::BoolOr => "__or__",
-            Operator::Equal => "__eq__",
-            Operator::NotEqual => "__ne__",
-            Operator::Greater => "__gt__",
-            Operator::Less => "__lt__",
-            Operator::GreaterOrEqual => "__ge__",
-            Operator::LessOrEqual => "__le__",
-            Operator::Add => "__add__",
-            Operator::Sub => "__sub__",
-            Operator::Mul => "__mul__",
-            Operator::Div => "__div__",
-        }
-    }
-}
 
 impl From<&str> for Operator {
     fn from(value: &str) -> Self {

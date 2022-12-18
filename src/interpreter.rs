@@ -8,6 +8,7 @@ use pest::Parser;
 
 use builtin::nil;
 
+use crate::interpreter::builtin::{Main, operator_method_name};
 use crate::interpreter::ErrorKind::{MethodNotFound, NameNotFound, SyntaxError, TypeError};
 use crate::interpreter::RustValue::F64;
 use crate::parser::{MocoviParser, NodeKind, Rule, SyntaxNode};
@@ -28,19 +29,19 @@ pub enum RustValue {
 pub struct ObjectId(usize);
 
 impl ObjectId {
-    pub fn get<'a>(&self, env: &'a Interpreter) -> &'a Object {
-        &env.objects[self.0]
+    pub fn get(ObjectId(index): Self, env: &Interpreter) -> &Object {
+        &env.objects[index]
     }
 
-    pub fn get_mut<'a>(&self, env: &'a mut Interpreter) -> &'a mut Object {
-        &mut env.objects[self.0]
+    pub fn get_mut(ObjectId(index): Self, env: &mut Interpreter) -> &mut Object {
+        &mut env.objects[index]
     }
 
-    pub fn class<'a>(&self, env: &'a Interpreter) -> &'a Class {
+    pub fn class(self, env: &Interpreter) -> &Class {
         self.get(env).class.get(env)
     }
 
-    pub fn class_mut<'a>(&self, env: &'a mut Interpreter) -> &'a mut Class {
+    pub fn class_mut(self, env: &mut Interpreter) -> &mut Class {
         self.get(env).class.clone().get_mut(env)
     }
 }
@@ -49,12 +50,12 @@ impl ObjectId {
 pub struct ClassId(usize);
 
 impl ClassId {
-    pub fn get<'a>(&self, env: &'a Interpreter) -> &'a Class {
-        &env.classes[self.0]
+    pub fn get(ClassId(index): Self, env: &Interpreter) -> &Class {
+        &env.classes[index]
     }
 
-    pub fn get_mut<'a>(&self, env: &'a mut Interpreter) -> &'a mut Class {
-        &mut env.classes[self.0]
+    pub fn get_mut(ClassId(index): Self, env: &mut Interpreter) -> &mut Class {
+        &mut env.classes[index]
     }
 }
 
@@ -101,7 +102,8 @@ impl Debug for MethodBody {
 
 impl Object {
     pub fn is_falsy(&self) -> bool {
-        matches!(self.underlying, RustValue::Bool(false) | RustValue::None)
+        self.class == builtin::Bool && matches!(self.underlying, RustValue::Bool(false)) ||
+            self.id == nil
     }
 
     pub fn is_truthy(&self) -> bool {
@@ -142,7 +144,6 @@ pub enum ErrorKind {
     MethodNotFound,
     TypeError,
     SyntaxError,
-    ArityError,
 }
 
 impl Display for ErrorKind {
@@ -154,6 +155,7 @@ impl Display for ErrorKind {
 #[allow(non_upper_case_globals)]
 pub mod builtin {
     use crate::interpreter::{ClassId, ObjectId};
+    use crate::parser::Operator;
 
     pub const CLASS_NAMES: &[&str] = &[
         "Nil",
@@ -176,7 +178,25 @@ pub mod builtin {
 
     pub const nil: ObjectId = ObjectId(0);
     pub const main: ObjectId = ObjectId(1);
+
+    pub const fn operator_method_name(operator: &Operator) -> &'static str {
+        match operator {
+            Operator::BoolAnd => "__and__",
+            Operator::BoolOr => "__or__",
+            Operator::Equal => "__eq__",
+            Operator::NotEqual => "__ne__",
+            Operator::Greater => "__gt__",
+            Operator::Less => "__lt__",
+            Operator::GreaterOrEqual => "__ge__",
+            Operator::LessOrEqual => "__le__",
+            Operator::Add => "__add__",
+            Operator::Sub => "__sub__",
+            Operator::Mul => "__mul__",
+            Operator::Div => "__div__",
+        }
+    }
 }
+
 
 impl Interpreter {
     pub fn new() -> Self {
@@ -201,6 +221,14 @@ impl Interpreter {
             methods: Default::default(),
         });
         id
+    }
+
+    pub fn create_string(&mut self, value: String) -> ObjectId {
+        self.create_object_with_underlying(builtin::String, RustValue::String(value))
+    }
+
+    pub fn create_number(&mut self, value: f64) -> ObjectId {
+        self.create_object_with_underlying(builtin::Number, F64(value))
     }
 
     pub fn create_object_with_underlying(&mut self, class: ClassId, underlying: RustValue) -> ObjectId {
@@ -248,7 +276,7 @@ impl Interpreter {
                             _ => unreachable!(),
                         };
                         let result = op(lhs, rhs);
-                        env.create_object_with_underlying(builtin::Number, F64(result))
+                        env.create_number(result)
                     }),
                 },
             );
@@ -266,7 +294,7 @@ impl Interpreter {
                         return nil;
                     };
                     let result = lhs + &rhs;
-                    env.create_object_with_underlying(builtin::String, RustValue::String(result))
+                    env.create_string(result)
                 }),
             },
         );
@@ -279,7 +307,7 @@ impl Interpreter {
                     let F64(value) = this.get(env).underlying else {
                         return nil; //TODO: error
                     };
-                    env.create_object_with_underlying(builtin::String, RustValue::String(value.to_string()))
+                    env.create_string(value.to_string())
                 }),
             },
         );
@@ -293,10 +321,23 @@ impl Interpreter {
                         return nil; //TODO: error
                     };
                     let repr = format!("\"{value}\"");
-                    env.create_object_with_underlying(builtin::String, RustValue::String(repr))
+                    env.create_string(repr)
                 }),
             },
         );
+        self.define_method_on(
+            Main,
+            Method {
+                name: "type".to_string(),
+                params: vec!["value".to_string()],
+                body: MethodBody::Builtin(|env, _, _, args| {
+                    let &[value] = args else {
+                        return nil;
+                    };
+                    env.create_string(value.class(env).name.clone())
+                }),
+            },
+        )
     }
 
     fn assign(&mut self, name: String, object: ObjectId) {
@@ -367,12 +408,12 @@ impl Interpreter {
                 nil
             }
             NodeKind::IfStmt { condition, then_body, else_body } => {
-                let ObjectId(condition) = self.eval(*condition)?;
-                let branch = if self.objects[condition].is_truthy() { then_body } else { else_body };
+                let condition = self.eval(*condition)?.get(self);
+                let branch = if condition.is_truthy() { then_body } else { else_body };
                 self.eval_seq(branch)?
             }
             NodeKind::WhileStmt { condition, body } => {
-                while self.eval(*condition.clone())?.get(self).is_truthy() {
+                while self.eval((*condition).clone())?.get(self).is_truthy() {
                     self.eval_seq(body.clone())?;
                 }
                 nil
@@ -408,7 +449,7 @@ impl Interpreter {
             NodeKind::BinaryExpr { lhs, operator, rhs } => {
                 let lhs = self.eval(*lhs)?;
                 let rhs = self.eval(*rhs)?;
-                let method_name = operator.method_name();
+                let method_name = operator_method_name(&operator);
                 self.call_method(
                     Some(&node),
                     lhs,
@@ -483,6 +524,9 @@ impl Interpreter {
             })?
             .clone();
         let result = match method.body {
+            MethodBody::Builtin(function) =>
+                function(self, receiver, method_name, args),
+
             MethodBody::User(body) => {
                 self.push_scope();
                 self.assign("self".to_string(), receiver);
@@ -503,9 +547,6 @@ impl Interpreter {
                 }
                 self.pop_scope();
                 result
-            }
-            MethodBody::Builtin(function) => {
-                function(self, receiver, method_name, args)
             }
         };
         Ok(result)
