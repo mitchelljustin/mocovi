@@ -60,7 +60,7 @@ pub enum NodeKind {
     FuncDef { name: String, params: Vec<String>, body: Vec<SyntaxNode> },
 
     // simple statements
-    Assignment { target: String, value: Box<SyntaxNode> },
+    Assignment { target: Vec<String>, value: Box<SyntaxNode> },
     Return { retval: Box<SyntaxNode> },
 
     // expressions
@@ -68,7 +68,8 @@ pub enum NodeKind {
     Call { target: String, args: Vec<SyntaxNode> },
 
     // primary
-    Reference { name: String },
+    Access { path: Vec<SyntaxNode> },
+    Ident { name: String },
 
     // literals
     StringLiteral { value: String },
@@ -230,17 +231,26 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
                 )
             }
             Rule::assignment => {
-                let expr = inner.next().unwrap();
-                let Some(value) = inner.next() else {
-                    return expr.into();
-                };
-                let target = expr.as_str().to_string();
+                let target = inner
+                    .next()
+                    .unwrap()
+                    .into_inner()
+                    .map(|pair| pair.as_str().to_string())
+                    .collect();
+                let value = Box::new(inner.next().unwrap().into());
                 SyntaxNode::new(
                     &pair,
                     NodeKind::Assignment {
                         target,
-                        value: Box::new(value.into()),
+                        value,
                     },
+                )
+            }
+            Rule::access => {
+                let path = inner.map(SyntaxNode::from).collect();
+                SyntaxNode::new(
+                    &pair,
+                    NodeKind::Access { path },
                 )
             }
             Rule::comparison |
@@ -302,7 +312,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
             Rule::ident =>
                 SyntaxNode::new(
                     &pair,
-                    NodeKind::Reference { name: pair.as_str().to_string() },
+                    NodeKind::Ident { name: pair.as_str().to_string() },
                 ),
             Rule::nil =>
                 SyntaxNode::new(

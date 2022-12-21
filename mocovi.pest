@@ -76,7 +76,11 @@ class_arg_list = {
 }
 
 assignment = {
-    ident ~ "=" ~ expr
+    assn_target ~ "=" ~ expr
+}
+
+assn_target = {
+    (ident ~ ".")* ~ ident
 }
 
 expr = {
@@ -100,9 +104,13 @@ term = {
 }
 term_op = { "+" | "-" }
 factor = {
-    call ~ (factor_op ~ call)*
+    access ~ (factor_op ~ access)*
 }
 factor_op = { "*" | "/" }
+
+access = {
+    (ident ~ ".")* ~ call
+}
 
 call = {
     ident ~ arg_list |

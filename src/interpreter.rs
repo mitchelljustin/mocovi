@@ -9,7 +9,7 @@ use pest::Parser;
 use builtin::nil;
 
 use crate::interpreter::builtin::{Main, operator_method_name};
-use crate::interpreter::ErrorKind::{MethodNotFound, NameNotFound, SyntaxError, TypeError};
+use crate::interpreter::ErrorKind::{MethodNotFound, NameNotFound, PropertyNotFound, SyntaxError, TypeError};
 use crate::interpreter::RustValue::F64;
 use crate::parser::{MocoviParser, NodeKind, Rule, SyntaxNode};
 
@@ -29,12 +29,12 @@ pub enum RustValue {
 pub struct ObjectId(usize);
 
 impl ObjectId {
-    pub fn get(ObjectId(index): Self, env: &Interpreter) -> &Object {
-        &env.objects[index]
+    pub fn get(self, env: &Interpreter) -> &Object {
+        &env.objects[self.0]
     }
 
-    pub fn get_mut(ObjectId(index): Self, env: &mut Interpreter) -> &mut Object {
-        &mut env.objects[index]
+    pub fn get_mut(self, env: &mut Interpreter) -> &mut Object {
+        &mut env.objects[self.0]
     }
 
     pub fn class(self, env: &Interpreter) -> &Class {
@@ -42,7 +42,7 @@ impl ObjectId {
     }
 
     pub fn class_mut(self, env: &mut Interpreter) -> &mut Class {
-        self.get(env).class.clone().get_mut(env)
+        self.get(env).class.get_mut(env)
     }
 }
 
@@ -50,12 +50,12 @@ impl ObjectId {
 pub struct ClassId(usize);
 
 impl ClassId {
-    pub fn get(ClassId(index): Self, env: &Interpreter) -> &Class {
-        &env.classes[index]
+    pub fn get(self, env: &Interpreter) -> &Class {
+        &env.classes[self.0]
     }
 
-    pub fn get_mut(ClassId(index): Self, env: &mut Interpreter) -> &mut Class {
-        &mut env.classes[index]
+    pub fn get_mut(self, env: &mut Interpreter) -> &mut Class {
+        &mut env.classes[self.0]
     }
 }
 
@@ -65,6 +65,23 @@ pub struct Object {
     pub class: ClassId,
     pub underlying: RustValue,
     pub properties: HashMap<String, ObjectId>,
+}
+
+impl Object {
+    pub fn get_property(&self, name: &str, source: Option<&SyntaxNode>) -> Result<ObjectId, Error> {
+        self.properties
+            .get(name)
+            .ok_or(Error {
+                kind: PropertyNotFound,
+                loc: source.map_or("???".to_string(), ToString::to_string),
+                msg: format!("no such property: '{name}'"),
+            })
+            .cloned()
+    }
+
+    pub fn set_property(&mut self, name: String, value: ObjectId) {
+        self.properties.insert(name, value);
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -142,6 +159,7 @@ impl std::error::Error for Error {}
 pub enum ErrorKind {
     NameNotFound,
     MethodNotFound,
+    PropertyNotFound,
     TypeError,
     SyntaxError,
 }
@@ -344,14 +362,18 @@ impl Interpreter {
         self.scope_stack.first_mut().unwrap().insert(name, object);
     }
 
-    fn retrieve(&self, name: &str) -> Option<ObjectId> {
+    fn retrieve(&self, name: &str, source: Option<&SyntaxNode>) -> Result<ObjectId, Error> {
         for scope in self.scope_stack.iter() {
             let Some(value) = scope.get(name).cloned() else {
                 continue;
             };
-            return Some(value);
+            return Ok(value);
         }
-        None
+        Err(Error {
+            kind: NameNotFound,
+            loc: source.map_or("???".to_string(), ToString::to_string),
+            msg: format!("name '{name}' is not defined"),
+        })
     }
 
     fn define_method_on(&mut self, class: ClassId, method: Method) {
@@ -402,9 +424,20 @@ impl Interpreter {
             NodeKind::Sequence { body } => {
                 self.eval_seq(body)?
             }
-            NodeKind::Assignment { target, value } => {
+            NodeKind::Assignment { mut target, value } => {
                 let value = self.eval(*value)?;
-                self.assign(target, value);
+                if target.len() == 1 {
+                    self.assign(target.remove(0), value);
+                } else {
+                    let property = target.pop().unwrap();
+                    let init_object = self.retrieve(&target.remove(0), Some(&node))?;
+                    let object = target
+                        .into_iter()
+                        .fold(Ok(init_object), |maybe_obj, property| {
+                            maybe_obj.and_then(|obj| obj.get(self).get_property(&property, Some(&node)))
+                        })?;
+                    object.get_mut(self).set_property(property, value);
+                }
                 nil
             }
             NodeKind::IfStmt { condition, then_body, else_body } => {
@@ -457,6 +490,35 @@ impl Interpreter {
                     &[rhs],
                 )?
             }
+            NodeKind::Access { mut path } => {
+                let mut result = self.eval(path.remove(0))?;
+                for component in path {
+                    match &component.kind {
+                        NodeKind::Ident { name } => {
+                            result = result.get(self).get_property(name, Some(&component))?;
+                        }
+                        NodeKind::Call { target, args } => {
+                            let args = args
+                                .iter()
+                                .cloned()
+                                .map(|node| self.eval(node))
+                                .collect::<Result<Vec<_>, _>>()?;
+                            result = self.call_method(
+                                Some(&component),
+                                result,
+                                target,
+                                &args,
+                            )?;
+                        }
+                        _ => return Err(Error {
+                            kind: SyntaxError,
+                            loc: component.to_string(),
+                            msg: format!("illegal access path part: {component:?}"),
+                        })
+                    }
+                }
+                result
+            }
             NodeKind::Call { target, args } => {
                 let args = args
                     .into_iter()
@@ -469,12 +531,8 @@ impl Interpreter {
                     &args,
                 )?
             }
-            NodeKind::Reference { name } =>
-                self.retrieve(&name).ok_or(Error {
-                    kind: NameNotFound,
-                    loc: node.to_string(),
-                    msg: format!("name '{name}' is not defined"),
-                })?,
+            NodeKind::Ident { name } =>
+                self.retrieve(&name, Some(&node))?,
             NodeKind::StringLiteral { value } =>
                 self.create_object_with_underlying(builtin::String, RustValue::String(value)),
             NodeKind::NumberLiteral { value } =>
