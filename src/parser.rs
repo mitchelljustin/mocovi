@@ -31,20 +31,20 @@ pub struct SyntaxNode {
     pub kind: NodeKind,
 }
 
-impl Display for SyntaxNode {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let Self { line_col: (line, col), source, .. } = self;
-        write!(f, "'{source}' at {line}:{col}")
-    }
-}
-
 impl SyntaxNode {
     pub fn new(pair: &Pair<Rule>, kind: NodeKind) -> Self {
+        let line_col = pair.as_span().start_pos().line_col();
+        let source = pair.as_str().to_string();
         Self {
-            line_col: pair.as_span().start_pos().line_col(),
-            source: pair.as_str().to_string(),
+            line_col,
+            source,
             kind,
         }
+    }
+
+    pub fn loc(&self) -> String {
+        let Self { line_col: (line, col), source, .. } = self;
+        format!("'{source}' at {line}:{col}")
     }
 }
 
@@ -89,11 +89,11 @@ impl Display for NodeKind {
 }
 
 trait PairsExt {
-    fn next_stmts(&mut self) -> Vec<SyntaxNode>;
+    fn next_body(&mut self) -> Vec<SyntaxNode>;
 }
 
 impl PairsExt for Pairs<'_, Rule> {
-    fn next_stmts(&mut self) -> Vec<SyntaxNode> {
+    fn next_body(&mut self) -> Vec<SyntaxNode> {
         match self.next() {
             Some(elements) => elements
                 .into_inner()
@@ -129,7 +129,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
 
             Rule::program |
             Rule::do_end => {
-                let body = inner.next_stmts();
+                let body = inner.next_body();
                 SyntaxNode::new(
                     &pair,
                     NodeKind::Sequence { body },
@@ -138,8 +138,8 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
 
             Rule::if_stmt => {
                 let condition = Box::new(inner.next().unwrap().into());
-                let then_body = inner.next_stmts();
-                let else_body = inner.next_stmts();
+                let then_body = inner.next_body();
+                let else_body = inner.next_body();
                 SyntaxNode::new(
                     &pair,
                     NodeKind::IfStmt {
@@ -151,7 +151,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
             }
             Rule::while_stmt => {
                 let condition = Box::new(inner.next().unwrap().into());
-                let body = inner.next_stmts();
+                let body = inner.next_body();
                 SyntaxNode::new(
                     &pair,
                     NodeKind::WhileStmt { condition, body },
@@ -160,7 +160,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
             Rule::for_stmt => {
                 let target = inner.next().unwrap().as_str().to_string();
                 let iterator = Box::new(inner.next().unwrap().into());
-                let body = inner.next_stmts();
+                let body = inner.next_body();
                 SyntaxNode::new(
                     &pair,
                     NodeKind::ForStmt { target, iterator, body },
@@ -213,7 +213,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
             }
             Rule::func_def => {
                 let (name, params) = collect_func_sig(&mut inner);
-                let body = inner.next_stmts();
+                let body = inner.next_body();
                 SyntaxNode::new(
                     &pair,
                     NodeKind::FuncDef {

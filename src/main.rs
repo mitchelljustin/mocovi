@@ -55,10 +55,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             Ok(builtin::nil) => {}
             Ok(result) => {
                 let repr = env.call_method(
-                    None,
                     result,
                     "__repr__",
                     &[],
+                    None,
                 );
                 if let Ok(repr_id) = repr {
                     let obj = repr_id.get(&env);

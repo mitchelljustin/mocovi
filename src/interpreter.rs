@@ -68,12 +68,12 @@ pub struct Object {
 }
 
 impl Object {
-    pub fn get_property(&self, name: &str, source: Option<&SyntaxNode>) -> Result<ObjectId, Error> {
+    pub fn get_property(&self, name: &str, node: &SyntaxNode) -> Result<ObjectId, Error> {
         self.properties
             .get(name)
             .ok_or(Error {
+                loc: node.loc(),
                 kind: PropertyNotFound,
-                loc: source.map_or("???".to_string(), ToString::to_string),
                 msg: format!("no such property: '{name}'"),
             })
             .cloned()
@@ -197,7 +197,7 @@ pub mod builtin {
     pub const nil: ObjectId = ObjectId(0);
     pub const main: ObjectId = ObjectId(1);
 
-    pub const fn operator_method_name(operator: &Operator) -> &'static str {
+    pub const fn operator_method_name(operator: Operator) -> &'static str {
         match operator {
             Operator::BoolAnd => "__and__",
             Operator::BoolOr => "__or__",
@@ -271,8 +271,8 @@ impl Interpreter {
             self.create_class(class_name.to_string());
         }
         self.create_object_with_underlying(builtin::Nil, RustValue::None);
-        self.create_object(builtin::Main);
-        self.class_stack.insert(0, builtin::Main);
+        self.create_object(Main);
+        self.class_stack.insert(0, Main);
         for name in ["__add__", "__sub__", "__mul__", "__div__"] {
             self.define_method_on(
                 builtin::Number,
@@ -362,7 +362,7 @@ impl Interpreter {
         self.scope_stack.first_mut().unwrap().insert(name, object);
     }
 
-    fn retrieve(&self, name: &str, source: Option<&SyntaxNode>) -> Result<ObjectId, Error> {
+    fn retrieve(&self, name: &str, node: &SyntaxNode) -> Result<ObjectId, Error> {
         for scope in self.scope_stack.iter() {
             let Some(value) = scope.get(name).cloned() else {
                 continue;
@@ -370,8 +370,8 @@ impl Interpreter {
             return Ok(value);
         }
         Err(Error {
+            loc: node.loc(),
             kind: NameNotFound,
-            loc: source.map_or("???".to_string(), ToString::to_string),
             msg: format!("name '{name}' is not defined"),
         })
     }
@@ -411,9 +411,7 @@ impl Interpreter {
 
     pub fn eval_source(&mut self, mut source: String) -> Result<ObjectId, Box<dyn std::error::Error>> {
         source.push('\n');
-        let Some(top_level_pair) = MocoviParser::parse(Rule::program, &source)?.next() else {
-            unreachable!();
-        };
+        let top_level_pair = MocoviParser::parse(Rule::program, &source)?.next().unwrap();
         let node = SyntaxNode::from(top_level_pair);
         self.eval(node).map_err(Into::into)
     }
@@ -430,11 +428,11 @@ impl Interpreter {
                     self.assign(target.remove(0), value);
                 } else {
                     let property = target.pop().unwrap();
-                    let init_object = self.retrieve(&target.remove(0), Some(&node))?;
+                    let init_object = self.retrieve(&target.remove(0), &node)?;
                     let object = target
                         .into_iter()
                         .fold(Ok(init_object), |maybe_obj, property| {
-                            maybe_obj.and_then(|obj| obj.get(self).get_property(&property, Some(&node)))
+                            maybe_obj.and_then(|obj| obj.get(self).get_property(&property, &node))
                         })?;
                     object.get_mut(self).set_property(property, value);
                 }
@@ -456,8 +454,8 @@ impl Interpreter {
                 if live_iterator.class != builtin::Array {
                     return Err(Error {
                         kind: TypeError,
-                        loc: iterator.to_string(),
-                        msg: format!("for..in expected Array type"),
+                        loc: iterator.loc(),
+                        msg: format!("for..in expected Array type, got {}", live_iterator.class.get(self).name),
                     });
                 }
                 let RustValue::Vec(elements) = live_iterator.underlying.clone() else {
@@ -482,12 +480,12 @@ impl Interpreter {
             NodeKind::BinaryExpr { lhs, operator, rhs } => {
                 let lhs = self.eval(*lhs)?;
                 let rhs = self.eval(*rhs)?;
-                let method_name = operator_method_name(&operator);
+                let method_name = operator_method_name(operator);
                 self.call_method(
-                    Some(&node),
                     lhs,
                     method_name,
                     &[rhs],
+                    Some(&node),
                 )?
             }
             NodeKind::Access { mut path } => {
@@ -495,7 +493,7 @@ impl Interpreter {
                 for component in path {
                     match &component.kind {
                         NodeKind::Ident { name } => {
-                            result = result.get(self).get_property(name, Some(&component))?;
+                            result = result.get(self).get_property(name, &component)?;
                         }
                         NodeKind::Call { target, args } => {
                             let args = args
@@ -504,15 +502,15 @@ impl Interpreter {
                                 .map(|node| self.eval(node))
                                 .collect::<Result<Vec<_>, _>>()?;
                             result = self.call_method(
-                                Some(&component),
                                 result,
                                 target,
                                 &args,
+                                Some(&component),
                             )?;
                         }
                         _ => return Err(Error {
                             kind: SyntaxError,
-                            loc: component.to_string(),
+                            loc: component.loc(),
                             msg: format!("illegal access path part: {component:?}"),
                         })
                     }
@@ -525,14 +523,14 @@ impl Interpreter {
                     .map(|node| self.eval(node))
                     .collect::<Result<Vec<_>, _>>()?;
                 self.call_method(
-                    Some(&node),
                     self.current_self,
                     &target,
                     &args,
+                    Some(&node),
                 )?
             }
             NodeKind::Ident { name } =>
-                self.retrieve(&name, Some(&node))?,
+                self.retrieve(&name, &node)?,
             NodeKind::StringLiteral { value } =>
                 self.create_object_with_underlying(builtin::String, RustValue::String(value)),
             NodeKind::NumberLiteral { value } =>
@@ -560,7 +558,7 @@ impl Interpreter {
             NodeKind::Return { .. } =>
                 return Err(Error {
                     kind: SyntaxError,
-                    loc: node.to_string(),
+                    loc: node.loc(),
                     msg: "'return' outside of function".to_string(),
                 }),
         };
@@ -568,16 +566,16 @@ impl Interpreter {
     }
 
     pub fn call_method(&mut self,
-                       node: Option<&SyntaxNode>,
                        receiver: ObjectId,
                        method_name: &str,
-                       args: &[ObjectId]) -> Result<ObjectId, Error> {
+                       args: &[ObjectId],
+                       node: Option<&SyntaxNode>) -> Result<ObjectId, Error> {
         let class = receiver.class(self);
         let method = class.methods
             .get(method_name)
             .ok_or(Error {
                 kind: MethodNotFound,
-                loc: node.map_or("???".to_string(), ToString::to_string),
+                loc: node.map_or("<unknown location>".to_string(), SyntaxNode::loc),
                 msg: format!("could not find method '{method_name}' on class '{}'", class.name),
             })?
             .clone();
