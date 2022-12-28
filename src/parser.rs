@@ -60,7 +60,7 @@ pub enum NodeKind {
     FuncDef { name: String, params: Vec<String>, body: Vec<SyntaxNode> },
 
     // simple statements
-    Assignment { target: Vec<String>, value: Box<SyntaxNode> },
+    Assignment { target: Vec<SyntaxNode>, value: Box<SyntaxNode> },
     Return { retval: Box<SyntaxNode> },
 
     // expressions
@@ -106,8 +106,9 @@ impl PairsExt for Pairs<'_, Rule> {
 }
 
 fn collect_func_sig(inner: &mut Pairs<Rule>) -> (String, Vec<String>) {
-    let name = inner.next().unwrap().as_str().to_string();
-    let params = inner.next().unwrap()
+    let [name, params] = inner.next_chunk().unwrap();
+    let name = name.as_str().to_string();
+    let params = params
         .into_inner()
         .map(|param| param.as_str().to_string())
         .collect();
@@ -158,8 +159,9 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
                 )
             }
             Rule::for_stmt => {
-                let target = inner.next().unwrap().as_str().to_string();
-                let iterator = Box::new(inner.next().unwrap().into());
+                let [target, iterator] = inner.next_chunk().unwrap();
+                let target = target.as_str().to_string();
+                let iterator = Box::new(iterator.into());
                 let body = inner.next_body();
                 SyntaxNode::new(
                     &pair,
@@ -180,8 +182,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
                 let entries = pair.clone()
                     .into_inner()
                     .map(|entry_pair| {
-                        let mut entry_inner = entry_pair.into_inner();
-                        let key_pair = entry_inner.next().unwrap();
+                        let [key_pair, value] = entry_pair.into_inner().next_chunk().unwrap();
                         let key = match key_pair.as_rule() {
                             Rule::ident => key_pair.as_str(),
                             Rule::string => {
@@ -190,8 +191,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
                             }
                             _ => unreachable!(),
                         };
-                        let value = entry_inner.next().unwrap().into();
-                        (key.to_string(), value)
+                        (key.to_string(), value.into())
                     })
                     .collect();
                 SyntaxNode::new(
@@ -235,7 +235,7 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
                     .next()
                     .unwrap()
                     .into_inner()
-                    .map(|pair| pair.as_str().to_string())
+                    .map(SyntaxNode::from)
                     .collect();
                 let value = Box::new(inner.next().unwrap().into());
                 SyntaxNode::new(

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::{Debug, Display, Formatter};
 use std::fs;
 use std::ops::{Add, Div, Mul, Sub};
@@ -40,10 +40,6 @@ impl ObjectId {
     pub fn class(self, env: &Interpreter) -> &Class {
         self.get(env).class.get(env)
     }
-
-    pub fn class_mut(self, env: &mut Interpreter) -> &mut Class {
-        self.get(env).class.get_mut(env)
-    }
 }
 
 #[derive(Copy, Clone, Default, Debug, Eq, PartialEq)]
@@ -68,13 +64,13 @@ pub struct Object {
 }
 
 impl Object {
-    pub fn get_property(&self, name: &str, node: &SyntaxNode) -> Result<ObjectId, Error> {
+    pub fn get_property(&self, name: &str, loc: String) -> Result<ObjectId, Error> {
         self.properties
             .get(name)
             .ok_or(Error {
-                loc: node.loc(),
                 kind: PropertyNotFound,
                 msg: format!("no such property: '{name}'"),
+                loc,
             })
             .cloned()
     }
@@ -130,7 +126,7 @@ impl Object {
 
 
 pub struct Interpreter {
-    scope_stack: Vec<HashMap<String, ObjectId>>,
+    scope_stack: VecDeque<HashMap<String, ObjectId>>,
     class_stack: Vec<ClassId>,
     objects: Vec<Object>,
     classes: Vec<Class>,
@@ -219,7 +215,7 @@ pub mod builtin {
 impl Interpreter {
     pub fn new() -> Self {
         let mut me = Self {
-            scope_stack: Vec::new(),
+            scope_stack: VecDeque::new(),
             class_stack: Vec::new(),
             objects: Vec::new(),
             classes: Vec::new(),
@@ -242,14 +238,14 @@ impl Interpreter {
     }
 
     pub fn create_string(&mut self, value: String) -> ObjectId {
-        self.create_object_with_underlying(builtin::String, RustValue::String(value))
+        self.create_instance_value(builtin::String, RustValue::String(value))
     }
 
     pub fn create_number(&mut self, value: f64) -> ObjectId {
-        self.create_object_with_underlying(builtin::Number, F64(value))
+        self.create_instance_value(builtin::Number, F64(value))
     }
 
-    pub fn create_object_with_underlying(&mut self, class: ClassId, underlying: RustValue) -> ObjectId {
+    pub fn create_instance_value(&mut self, class: ClassId, underlying: RustValue) -> ObjectId {
         let id = ObjectId(self.objects.len());
         self.objects.push(Object {
             id,
@@ -260,18 +256,18 @@ impl Interpreter {
         id
     }
 
-    pub fn create_object(&mut self, class: ClassId) -> ObjectId {
-        self.create_object_with_underlying(class, Default::default())
+    pub fn create_instance(&mut self, class: ClassId) -> ObjectId {
+        self.create_instance_value(class, Default::default())
     }
 
 
     pub fn init(&mut self) {
-        self.scope_stack.push(Default::default());
+        self.scope_stack.push_back(Default::default());
         for class_name in builtin::CLASS_NAMES {
             self.create_class(class_name.to_string());
         }
-        self.create_object_with_underlying(builtin::Nil, RustValue::None);
-        self.create_object(Main);
+        self.create_instance_value(builtin::Nil, RustValue::None);
+        self.create_instance(Main);
         self.class_stack.insert(0, Main);
         for name in ["__add__", "__sub__", "__mul__", "__div__"] {
             self.define_method_on(
@@ -359,18 +355,18 @@ impl Interpreter {
     }
 
     fn assign(&mut self, name: String, object: ObjectId) {
-        self.scope_stack.first_mut().unwrap().insert(name, object);
+        self.scope_stack[0].insert(name, object);
     }
 
-    fn retrieve(&self, name: &str, node: &SyntaxNode) -> Result<ObjectId, Error> {
-        for scope in self.scope_stack.iter() {
+    fn retrieve(&self, name: &str, loc: String) -> Result<ObjectId, Error> {
+        for scope in &self.scope_stack {
             let Some(value) = scope.get(name).cloned() else {
                 continue;
             };
             return Ok(value);
         }
         Err(Error {
-            loc: node.loc(),
+            loc,
             kind: NameNotFound,
             msg: format!("name '{name}' is not defined"),
         })
@@ -389,14 +385,14 @@ impl Interpreter {
     }
 
     fn push_scope(&mut self) {
-        self.scope_stack.insert(0, HashMap::new());
+        self.scope_stack.push_front(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
-        self.scope_stack.remove(0);
+        self.scope_stack.pop_front();
     }
 
-    fn eval_seq(&mut self, stmts: impl IntoIterator<Item=SyntaxNode>) -> Result<ObjectId, Error> {
+    fn eval_sequence(&mut self, stmts: impl IntoIterator<Item=SyntaxNode>) -> Result<ObjectId, Error> {
         let mut result = nil;
         for stmt in stmts {
             result = self.eval(stmt)?;
@@ -417,35 +413,44 @@ impl Interpreter {
     }
 
     pub fn eval(&mut self, node: SyntaxNode) -> Result<ObjectId, Error> {
-        let result = match node.kind.clone() {
+        let loc = node.loc();
+        let result = match node.kind {
             // statements
-            NodeKind::Sequence { body } => {
-                self.eval_seq(body)?
-            }
+            NodeKind::Sequence { body } => self.eval_sequence(body)?,
             NodeKind::Assignment { mut target, value } => {
                 let value = self.eval(*value)?;
                 if target.len() == 1 {
-                    self.assign(target.remove(0), value);
+                    let name_node = target.remove(0);
+                    let NodeKind::Ident { name } = name_node.kind else {
+                        return Err(Error {
+                            kind: SyntaxError,
+                            loc: name_node.loc(),
+                            msg: format!("assignment target must be ident: '{name_node:?}'"),
+                        });
+                    };
+                    self.assign(name, value);
                 } else {
-                    let property = target.pop().unwrap();
-                    let init_object = self.retrieve(&target.remove(0), &node)?;
-                    let object = target
-                        .into_iter()
-                        .fold(Ok(init_object), |maybe_obj, property| {
-                            maybe_obj.and_then(|obj| obj.get(self).get_property(&property, &node))
-                        })?;
-                    object.get_mut(self).set_property(property, value);
+                    let property_node = target.pop().unwrap();
+                    let NodeKind::Ident { name: property } = property_node.kind else {
+                        return Err(Error {
+                            kind: SyntaxError,
+                            loc: property_node.loc(),
+                            msg: format!("compound assignment target must be field: '{property_node:?}'"),
+                        });
+                    };
+                    let target = self.eval_access(target)?;
+                    target.get_mut(self).set_property(property, value);
                 }
                 nil
             }
             NodeKind::IfStmt { condition, then_body, else_body } => {
                 let condition = self.eval(*condition)?.get(self);
                 let branch = if condition.is_truthy() { then_body } else { else_body };
-                self.eval_seq(branch)?
+                self.eval_sequence(branch)?
             }
             NodeKind::WhileStmt { condition, body } => {
                 while self.eval((*condition).clone())?.get(self).is_truthy() {
-                    self.eval_seq(body.clone())?;
+                    self.eval_sequence(body.clone())?;
                 }
                 nil
             }
@@ -464,7 +469,7 @@ impl Interpreter {
                 self.push_scope();
                 for item in elements {
                     self.assign(target.clone(), item);
-                    self.eval_seq(body.clone())?;
+                    self.eval_sequence(body.clone())?;
                 }
                 self.pop_scope();
                 nil
@@ -485,38 +490,10 @@ impl Interpreter {
                     lhs,
                     method_name,
                     &[rhs],
-                    Some(&node),
+                    loc,
                 )?
             }
-            NodeKind::Access { mut path } => {
-                let mut result = self.eval(path.remove(0))?;
-                for component in path {
-                    match &component.kind {
-                        NodeKind::Ident { name } => {
-                            result = result.get(self).get_property(name, &component)?;
-                        }
-                        NodeKind::Call { target, args } => {
-                            let args = args
-                                .iter()
-                                .cloned()
-                                .map(|node| self.eval(node))
-                                .collect::<Result<Vec<_>, _>>()?;
-                            result = self.call_method(
-                                result,
-                                target,
-                                &args,
-                                Some(&component),
-                            )?;
-                        }
-                        _ => return Err(Error {
-                            kind: SyntaxError,
-                            loc: component.loc(),
-                            msg: format!("illegal access path part: {component:?}"),
-                        })
-                    }
-                }
-                result
-            }
+            NodeKind::Access { path } => self.eval_access(path)?,
             NodeKind::Call { target, args } => {
                 let args = args
                     .into_iter()
@@ -526,23 +503,23 @@ impl Interpreter {
                     self.current_self,
                     &target,
                     &args,
-                    Some(&node),
+                    loc,
                 )?
             }
             NodeKind::Ident { name } =>
-                self.retrieve(&name, &node)?,
+                self.retrieve(&name, loc)?,
             NodeKind::StringLiteral { value } =>
-                self.create_object_with_underlying(builtin::String, RustValue::String(value)),
+                self.create_instance_value(builtin::String, RustValue::String(value)),
             NodeKind::NumberLiteral { value } =>
-                self.create_object_with_underlying(builtin::Number, F64(value)),
+                self.create_instance_value(builtin::Number, F64(value)),
             NodeKind::BooleanLiteral { value } =>
-                self.create_object_with_underlying(builtin::Bool, RustValue::Bool(value)),
+                self.create_instance_value(builtin::Bool, RustValue::Bool(value)),
             NodeKind::ArrayLiteral { elements } => {
                 let array = elements
                     .into_iter()
                     .map(|el| self.eval(el))
                     .collect::<Result<_, _>>()?;
-                self.create_object_with_underlying(builtin::Array, RustValue::Vec(array))
+                self.create_instance_value(builtin::Array, RustValue::Vec(array))
             }
             NodeKind::DictLiteral { entries } => {
                 let mut dict = HashMap::new();
@@ -550,7 +527,7 @@ impl Interpreter {
                     let value = self.eval(value)?;
                     dict.insert(key, value);
                 }
-                self.create_object_with_underlying(builtin::Dict, RustValue::HashMap(dict))
+                self.create_instance_value(builtin::Dict, RustValue::HashMap(dict))
             }
 
             NodeKind::NilLiteral =>
@@ -558,10 +535,41 @@ impl Interpreter {
             NodeKind::Return { .. } =>
                 return Err(Error {
                     kind: SyntaxError,
-                    loc: node.loc(),
                     msg: "'return' outside of function".to_string(),
+                    loc,
                 }),
         };
+        Ok(result)
+    }
+
+    fn eval_access(&mut self, path: Vec<SyntaxNode>) -> Result<ObjectId, Error> {
+        assert!(!path.is_empty());
+        let mut components = path.into_iter();
+        let mut result = self.eval(components.next().unwrap())?;
+        for component in components {
+            result = match &component.kind {
+                NodeKind::Ident { name } =>
+                    result.get(self).get_property(name, component.loc())?,
+                NodeKind::Call { target, args } => {
+                    let args = args
+                        .iter()
+                        .cloned()
+                        .map(|node| self.eval(node))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.call_method(
+                        result,
+                        target,
+                        &args,
+                        component.loc(),
+                    )?
+                }
+                _ => return Err(Error {
+                    kind: SyntaxError,
+                    loc: component.loc(),
+                    msg: format!("illegal access path part: {component:?}"),
+                })
+            }
+        }
         Ok(result)
     }
 
@@ -569,14 +577,14 @@ impl Interpreter {
                        receiver: ObjectId,
                        method_name: &str,
                        args: &[ObjectId],
-                       node: Option<&SyntaxNode>) -> Result<ObjectId, Error> {
+                       loc: String) -> Result<ObjectId, Error> {
         let class = receiver.class(self);
         let method = class.methods
             .get(method_name)
             .ok_or(Error {
                 kind: MethodNotFound,
-                loc: node.map_or("<unknown location>".to_string(), SyntaxNode::loc),
                 msg: format!("could not find method '{method_name}' on class '{}'", class.name),
+                loc,
             })?
             .clone();
         let result = match method.body {

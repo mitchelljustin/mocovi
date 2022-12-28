@@ -6,11 +6,12 @@
 #![feature(maybe_uninit_uninit_array)]
 #![feature(maybe_uninit_uninit_array_transpose)]
 #![feature(array_methods)]
+#![feature(iter_next_chunk)]
 
 extern crate core;
 
 use std::error::Error;
-use std::io::{BufRead, stderr, stdin, stdout, Write};
+use std::io::{BufRead, stdin, stdout, Write};
 
 use ansi_term::Color::{Green, Red};
 
@@ -58,7 +59,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     result,
                     "__repr__",
                     &[],
-                    None,
+                    "<REPL>".to_string(),
                 );
                 if let Ok(repr_id) = repr {
                     let obj = repr_id.get(&env);
