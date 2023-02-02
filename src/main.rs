@@ -7,6 +7,8 @@
 #![feature(maybe_uninit_uninit_array_transpose)]
 #![feature(array_methods)]
 #![feature(iter_next_chunk)]
+#![feature(iter_array_chunks)]
+#![feature(sized_type_properties)]
 
 extern crate core;
 
@@ -15,14 +17,14 @@ use std::io::{BufRead, stdin, stdout, Write};
 
 use ansi_term::Color::{Green, Red};
 
-use crate::interpreter::{builtin, Interpreter, RustValue};
+use crate::interpreter::{builtin, Environment, Underlying};
 
 mod parser;
 mod interpreter;
 
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut env = Interpreter::new();
+    let mut env = Environment::new();
     env.eval_file("./example/lib.rb")?;
     let mut stdout = stdout();
     print!(">> ");
@@ -66,7 +68,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let class = obj.class.get(&env);
                     let string =
                         if class.id == builtin::String {
-                            let RustValue::String(inner_string) = &obj.underlying else {
+                            let Underlying::String(inner_string) = &obj.underlying else {
                                 unreachable!();
                             };
                             inner_string.clone()

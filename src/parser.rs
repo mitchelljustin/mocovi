@@ -3,7 +3,6 @@ use std::fmt::{Debug, Display, Formatter};
 use pest::iterators::{Pair, Pairs};
 use pest_derive::*;
 
-
 #[derive(Parser)]
 #[grammar = "mocovi.pest"]
 pub struct MocoviParser;
@@ -95,12 +94,13 @@ trait PairsExt {
 impl PairsExt for Pairs<'_, Rule> {
     fn next_body(&mut self) -> Vec<SyntaxNode> {
         match self.next() {
-            Some(elements) => elements
-                .into_inner()
-                .filter(|stmt| !stmt.as_str().trim().is_empty())
-                .map(SyntaxNode::from)
-                .collect(),
-            None => Vec::new(),
+            Some(elements) =>
+                elements
+                    .into_inner()
+                    .filter_map(|pair| (!pair.as_str().trim().is_empty()).then(|| pair.into()))
+                    .collect(),
+            None =>
+                Vec::new(),
         }
     }
 }
@@ -224,20 +224,19 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
                 )
             }
             Rule::return_stmt => {
-                let retval = Box::new(pair.clone().into_inner().next().unwrap().into());
+                let retval = Box::new(inner.next().unwrap().into());
                 SyntaxNode::new(
                     &pair,
                     NodeKind::Return { retval },
                 )
             }
             Rule::assignment => {
-                let target = inner
-                    .next()
-                    .unwrap()
+                let [target, value] = inner.next_chunk().unwrap();
+                let target = target
                     .into_inner()
                     .map(SyntaxNode::from)
                     .collect();
-                let value = Box::new(inner.next().unwrap().into());
+                let value = Box::new(value.into());
                 SyntaxNode::new(
                     &pair,
                     NodeKind::Assignment {
@@ -257,11 +256,11 @@ impl From<Pair<'_, Rule>> for SyntaxNode {
             Rule::bool_expr |
             Rule::term |
             Rule::factor => {
-                let start_pair = inner.next().unwrap();
-                let mut expr = start_pair.clone().into();
-                while let (Some(operator), Some(rhs)) = (inner.next(), inner.next()) {
+                let lhs = inner.next().unwrap();
+                let mut expr = lhs.clone().into();
+                for [operator, rhs] in inner.array_chunks() {
                     expr = SyntaxNode::new(
-                        &start_pair, // not technically proper
+                        &lhs, // not technically proper
                         NodeKind::BinaryExpr {
                             operator: operator.as_str().into(),
                             lhs: Box::new(expr),

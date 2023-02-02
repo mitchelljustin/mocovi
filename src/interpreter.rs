@@ -10,11 +10,11 @@ use builtin::nil;
 
 use crate::interpreter::builtin::{Main, operator_method_name};
 use crate::interpreter::ErrorKind::{MethodNotFound, NameNotFound, PropertyNotFound, SyntaxError, TypeError};
-use crate::interpreter::RustValue::F64;
+use crate::interpreter::Underlying::F64;
 use crate::parser::{MocoviParser, NodeKind, Rule, SyntaxNode};
 
 #[derive(Clone, Debug, Default)]
-pub enum RustValue {
+pub enum Underlying {
     #[default]
     None,
 
@@ -29,15 +29,15 @@ pub enum RustValue {
 pub struct ObjectId(usize);
 
 impl ObjectId {
-    pub fn get(self, env: &Interpreter) -> &Object {
+    pub fn get(self, env: &Environment) -> &Object {
         &env.objects[self.0]
     }
 
-    pub fn get_mut(self, env: &mut Interpreter) -> &mut Object {
+    pub fn get_mut(self, env: &mut Environment) -> &mut Object {
         &mut env.objects[self.0]
     }
 
-    pub fn class(self, env: &Interpreter) -> &Class {
+    pub fn class(self, env: &Environment) -> &Class {
         self.get(env).class.get(env)
     }
 }
@@ -46,11 +46,11 @@ impl ObjectId {
 pub struct ClassId(usize);
 
 impl ClassId {
-    pub fn get(self, env: &Interpreter) -> &Class {
+    pub fn get(self, env: &Environment) -> &Class {
         &env.classes[self.0]
     }
 
-    pub fn get_mut(self, env: &mut Interpreter) -> &mut Class {
+    pub fn get_mut(self, env: &mut Environment) -> &mut Class {
         &mut env.classes[self.0]
     }
 }
@@ -59,7 +59,7 @@ impl ClassId {
 pub struct Object {
     pub id: ObjectId,
     pub class: ClassId,
-    pub underlying: RustValue,
+    pub underlying: Underlying,
     pub properties: HashMap<String, ObjectId>,
 }
 
@@ -68,9 +68,9 @@ impl Object {
         self.properties
             .get(name)
             .ok_or(Error {
+                loc,
                 kind: PropertyNotFound,
                 msg: format!("no such property: '{name}'"),
-                loc,
             })
             .cloned()
     }
@@ -94,7 +94,7 @@ pub struct Method {
     pub body: MethodBody,
 }
 
-pub type MethodFunction = fn(&mut Interpreter, ObjectId, &str, &[ObjectId]) -> ObjectId;
+pub type MethodFunction = fn(&mut Environment, ObjectId, &str, &[ObjectId]) -> ObjectId;
 
 #[derive(Clone)]
 pub enum MethodBody {
@@ -115,7 +115,7 @@ impl Debug for MethodBody {
 
 impl Object {
     pub fn is_falsy(&self) -> bool {
-        self.class == builtin::Bool && matches!(self.underlying, RustValue::Bool(false)) ||
+        self.class == builtin::Bool && matches!(self.underlying, Underlying::Bool(false)) ||
             self.id == nil
     }
 
@@ -125,7 +125,7 @@ impl Object {
 }
 
 
-pub struct Interpreter {
+pub struct Environment {
     scope_stack: VecDeque<HashMap<String, ObjectId>>,
     class_stack: Vec<ClassId>,
     objects: Vec<Object>,
@@ -138,7 +138,7 @@ pub struct Interpreter {
 pub struct Error {
     kind: ErrorKind,
     msg: String,
-    pub loc: String,
+    loc: String,
 }
 
 impl Display for Error {
@@ -212,7 +212,7 @@ pub mod builtin {
 }
 
 
-impl Interpreter {
+impl Environment {
     pub fn new() -> Self {
         let mut me = Self {
             scope_stack: VecDeque::new(),
@@ -238,14 +238,14 @@ impl Interpreter {
     }
 
     pub fn create_string(&mut self, value: String) -> ObjectId {
-        self.create_instance_value(builtin::String, RustValue::String(value))
+        self.create_instance_with_value(builtin::String, Underlying::String(value))
     }
 
     pub fn create_number(&mut self, value: f64) -> ObjectId {
-        self.create_instance_value(builtin::Number, F64(value))
+        self.create_instance_with_value(builtin::Number, F64(value))
     }
 
-    pub fn create_instance_value(&mut self, class: ClassId, underlying: RustValue) -> ObjectId {
+    pub fn create_instance_with_value(&mut self, class: ClassId, underlying: Underlying) -> ObjectId {
         let id = ObjectId(self.objects.len());
         self.objects.push(Object {
             id,
@@ -257,7 +257,7 @@ impl Interpreter {
     }
 
     pub fn create_instance(&mut self, class: ClassId) -> ObjectId {
-        self.create_instance_value(class, Default::default())
+        self.create_instance_with_value(class, Default::default())
     }
 
 
@@ -266,7 +266,7 @@ impl Interpreter {
         for class_name in builtin::CLASS_NAMES {
             self.create_class(class_name.to_string());
         }
-        self.create_instance_value(builtin::Nil, RustValue::None);
+        self.create_instance_with_value(builtin::Nil, Underlying::None);
         self.create_instance(Main);
         self.class_stack.insert(0, Main);
         for name in ["__add__", "__sub__", "__mul__", "__div__"] {
@@ -304,10 +304,11 @@ impl Interpreter {
                     let &[rhs] = args else {
                         return nil; // TODO: error
                     };
-                    let [RustValue::String(lhs), RustValue::String(rhs)] = [this, rhs].map(|x| x.get(env).underlying.clone()) else {
+                    let [Underlying::String(lhs), Underlying::String(rhs)] =
+                        [this, rhs].map(|x| &x.get(env).underlying) else {
                         return nil;
                     };
-                    let result = lhs + &rhs;
+                    let result = String::new() + lhs + rhs;
                     env.create_string(result)
                 }),
             },
@@ -331,7 +332,7 @@ impl Interpreter {
                 name: "__repr__".to_string(),
                 params: vec![],
                 body: MethodBody::Builtin(|env, this, _, _| {
-                    let RustValue::String(value) = &this.get(env).underlying else {
+                    let Underlying::String(value) = &this.get(env).underlying else {
                         return nil; //TODO: error
                     };
                     let repr = format!("\"{value}\"");
@@ -360,10 +361,10 @@ impl Interpreter {
 
     fn retrieve(&self, name: &str, loc: String) -> Result<ObjectId, Error> {
         for scope in &self.scope_stack {
-            let Some(value) = scope.get(name).cloned() else {
+            let Some(value) = scope.get(name) else {
                 continue;
             };
-            return Ok(value);
+            return Ok(*value);
         }
         Err(Error {
             loc,
@@ -407,8 +408,8 @@ impl Interpreter {
 
     pub fn eval_source(&mut self, mut source: String) -> Result<ObjectId, Box<dyn std::error::Error>> {
         source.push('\n');
-        let top_level_pair = MocoviParser::parse(Rule::program, &source)?.next().unwrap();
-        let node = SyntaxNode::from(top_level_pair);
+        let program_pair = MocoviParser::parse(Rule::program, &source)?.next().unwrap();
+        let node = SyntaxNode::from(program_pair);
         self.eval(node).map_err(Into::into)
     }
 
@@ -455,15 +456,16 @@ impl Interpreter {
                 nil
             }
             NodeKind::ForStmt { target, iterator, body } => {
-                let live_iterator = self.eval(*iterator.clone())?.get(self);
+                let loc = iterator.loc();
+                let live_iterator = self.eval(*iterator)?.get(self);
                 if live_iterator.class != builtin::Array {
                     return Err(Error {
+                        loc,
                         kind: TypeError,
-                        loc: iterator.loc(),
                         msg: format!("for..in expected Array type, got {}", live_iterator.class.get(self).name),
                     });
                 }
-                let RustValue::Vec(elements) = live_iterator.underlying.clone() else {
+                let Underlying::Vec(elements) = live_iterator.underlying.clone() else {
                     unreachable!();
                 };
                 self.push_scope();
@@ -509,17 +511,17 @@ impl Interpreter {
             NodeKind::Ident { name } =>
                 self.retrieve(&name, loc)?,
             NodeKind::StringLiteral { value } =>
-                self.create_instance_value(builtin::String, RustValue::String(value)),
+                self.create_instance_with_value(builtin::String, Underlying::String(value)),
             NodeKind::NumberLiteral { value } =>
-                self.create_instance_value(builtin::Number, F64(value)),
+                self.create_instance_with_value(builtin::Number, F64(value)),
             NodeKind::BooleanLiteral { value } =>
-                self.create_instance_value(builtin::Bool, RustValue::Bool(value)),
+                self.create_instance_with_value(builtin::Bool, Underlying::Bool(value)),
             NodeKind::ArrayLiteral { elements } => {
                 let array = elements
                     .into_iter()
                     .map(|el| self.eval(el))
                     .collect::<Result<_, _>>()?;
-                self.create_instance_value(builtin::Array, RustValue::Vec(array))
+                self.create_instance_with_value(builtin::Array, Underlying::Vec(array))
             }
             NodeKind::DictLiteral { entries } => {
                 let mut dict = HashMap::new();
@@ -527,7 +529,7 @@ impl Interpreter {
                     let value = self.eval(value)?;
                     dict.insert(key, value);
                 }
-                self.create_instance_value(builtin::Dict, RustValue::HashMap(dict))
+                self.create_instance_with_value(builtin::Dict, Underlying::HashMap(dict))
             }
 
             NodeKind::NilLiteral =>
@@ -547,25 +549,25 @@ impl Interpreter {
         let mut components = path.into_iter();
         let mut result = self.eval(components.next().unwrap())?;
         for component in components {
-            result = match &component.kind {
+            let loc = component.loc();
+            result = match component.kind {
                 NodeKind::Ident { name } =>
-                    result.get(self).get_property(name, component.loc())?,
+                    result.get(self).get_property(&name, loc)?,
                 NodeKind::Call { target, args } => {
                     let args = args
-                        .iter()
-                        .cloned()
+                        .into_iter()
                         .map(|node| self.eval(node))
                         .collect::<Result<Vec<_>, _>>()?;
                     self.call_method(
                         result,
-                        target,
+                        &target,
                         &args,
-                        component.loc(),
+                        loc,
                     )?
                 }
                 _ => return Err(Error {
+                    loc,
                     kind: SyntaxError,
-                    loc: component.loc(),
                     msg: format!("illegal access path part: {component:?}"),
                 })
             }
@@ -599,13 +601,13 @@ impl Interpreter {
                 }
                 let mut result = nil;
                 for stmt in body {
-                    match &stmt.kind {
+                    match stmt.kind {
                         NodeKind::Return { retval } => {
-                            result = self.eval(*retval.clone())?;
+                            result = self.eval(*retval)?;
                             break;
                         }
                         _ => {
-                            result = self.eval(stmt.clone())?;
+                            result = self.eval(stmt)?;
                         }
                     };
                 }
