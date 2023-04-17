@@ -13,15 +13,14 @@
 extern crate core;
 
 use std::error::Error;
-use std::io::{BufRead, stdin, stdout, Write};
+use std::io::{stdin, stdout, BufRead, Write};
 
 use ansi_term::Color::{Green, Red};
 
 use crate::interpreter::{builtin, Environment, Underlying};
 
-mod parser;
 mod interpreter;
-
+mod parser;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut env = Environment::new();
@@ -57,22 +56,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         match env.eval_source(source) {
             Ok(builtin::nil) => {}
             Ok(result) => {
-                let repr = env.call_method(
-                    result,
-                    "__repr__",
-                    &[],
-                    "<REPL>".to_string(),
-                );
+                let repr = env.call_method(result, "__repr__", &[], "<REPL>".to_string());
                 if let Ok(repr_id) = repr {
                     let obj = repr_id.get(&env);
                     let class = obj.class.get(&env);
-                    let string =
-                        if class.id == builtin::String {
-                            let Underlying::String(inner_string) = &obj.underlying else {
+                    let string = if class.id == builtin::String {
+                        let Underlying::String(inner_string) = &obj.underlying else {
                                 unreachable!();
                             };
-                            inner_string.clone()
-                        } else { "???".to_string() };
+                        inner_string.clone()
+                    } else {
+                        "???".to_string()
+                    };
                     println!("=> {}", Green.paint(string));
                 };
             }

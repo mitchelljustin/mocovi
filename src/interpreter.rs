@@ -8,8 +8,10 @@ use pest::Parser;
 
 use builtin::nil;
 
-use crate::interpreter::builtin::{Main, operator_method_name};
-use crate::interpreter::ErrorKind::{MethodNotFound, NameNotFound, PropertyNotFound, SyntaxError, TypeError};
+use crate::interpreter::builtin::{operator_method_name, Main};
+use crate::interpreter::ErrorKind::{
+    MethodNotFound, NameNotFound, PropertyNotFound, SyntaxError, TypeError,
+};
 use crate::interpreter::Underlying::F64;
 use crate::parser::{MocoviParser, NodeKind, Rule, SyntaxNode};
 
@@ -105,25 +107,22 @@ pub enum MethodBody {
 impl Debug for MethodBody {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            MethodBody::User(body) =>
-                f.debug_list().entries(body).finish(),
-            MethodBody::Builtin(_) =>
-                write!(f, "<builtin>"),
+            MethodBody::User(body) => f.debug_list().entries(body).finish(),
+            MethodBody::Builtin(_) => write!(f, "<builtin>"),
         }
     }
 }
 
 impl Object {
     pub fn is_falsy(&self) -> bool {
-        self.class == builtin::Bool && matches!(self.underlying, Underlying::Bool(false)) ||
-            self.id == nil
+        self.class == builtin::Bool && matches!(self.underlying, Underlying::Bool(false))
+            || self.id == nil
     }
 
     pub fn is_truthy(&self) -> bool {
         !self.is_falsy()
     }
 }
-
 
 pub struct Environment {
     scope_stack: VecDeque<HashMap<String, ObjectId>>,
@@ -150,7 +149,6 @@ impl Display for Error {
 
 impl std::error::Error for Error {}
 
-
 #[derive(Debug, Clone)]
 pub enum ErrorKind {
     NameNotFound,
@@ -171,15 +169,7 @@ pub mod builtin {
     use crate::interpreter::{ClassId, ObjectId};
     use crate::parser::Operator;
 
-    pub const CLASS_NAMES: &[&str] = &[
-        "Nil",
-        "Number",
-        "String",
-        "Bool",
-        "Array",
-        "Dict",
-        "Main",
-    ];
+    pub const CLASS_NAMES: &[&str] = &["Nil", "Number", "String", "Bool", "Array", "Dict", "Main"];
 
     pub const Nil: ClassId = ClassId(0);
     pub const Number: ClassId = ClassId(1);
@@ -210,7 +200,6 @@ pub mod builtin {
         }
     }
 }
-
 
 impl Environment {
     pub fn new() -> Self {
@@ -245,7 +234,11 @@ impl Environment {
         self.create_instance_with_value(builtin::Number, F64(value))
     }
 
-    pub fn create_instance_with_value(&mut self, class: ClassId, underlying: Underlying) -> ObjectId {
+    pub fn create_instance_with_value(
+        &mut self,
+        class: ClassId,
+        underlying: Underlying,
+    ) -> ObjectId {
         let id = ObjectId(self.objects.len());
         self.objects.push(Object {
             id,
@@ -259,7 +252,6 @@ impl Environment {
     pub fn create_instance(&mut self, class: ClassId) -> ObjectId {
         self.create_instance_with_value(class, Default::default())
     }
-
 
     pub fn init(&mut self) {
         self.scope_stack.push_back(Default::default());
@@ -379,10 +371,7 @@ impl Environment {
     }
 
     fn define_method(&mut self, method: Method) {
-        self.define_method_on(
-            *self.class_stack.first().unwrap(),
-            method,
-        );
+        self.define_method_on(*self.class_stack.first().unwrap(), method);
     }
 
     fn push_scope(&mut self) {
@@ -393,7 +382,10 @@ impl Environment {
         self.scope_stack.pop_front();
     }
 
-    fn eval_sequence(&mut self, stmts: impl IntoIterator<Item=SyntaxNode>) -> Result<ObjectId, Error> {
+    fn eval_sequence(
+        &mut self,
+        stmts: impl IntoIterator<Item = SyntaxNode>,
+    ) -> Result<ObjectId, Error> {
         let mut result = nil;
         for stmt in stmts {
             result = self.eval(stmt)?;
@@ -401,12 +393,18 @@ impl Environment {
         Ok(result)
     }
 
-    pub fn eval_file(&mut self, path: impl AsRef<Path>) -> Result<ObjectId, Box<dyn std::error::Error>> {
+    pub fn eval_file(
+        &mut self,
+        path: impl AsRef<Path>,
+    ) -> Result<ObjectId, Box<dyn std::error::Error>> {
         let source = fs::read_to_string(path)?;
         self.eval_source(source)
     }
 
-    pub fn eval_source(&mut self, mut source: String) -> Result<ObjectId, Box<dyn std::error::Error>> {
+    pub fn eval_source(
+        &mut self,
+        mut source: String,
+    ) -> Result<ObjectId, Box<dyn std::error::Error>> {
         source.push('\n');
         let program_pair = MocoviParser::parse(Rule::program, &source)?.next().unwrap();
         let node = SyntaxNode::from(program_pair);
@@ -444,9 +442,17 @@ impl Environment {
                 }
                 nil
             }
-            NodeKind::IfStmt { condition, then_body, else_body } => {
+            NodeKind::IfStmt {
+                condition,
+                then_body,
+                else_body,
+            } => {
                 let condition = self.eval(*condition)?.get(self);
-                let branch = if condition.is_truthy() { then_body } else { else_body };
+                let branch = if condition.is_truthy() {
+                    then_body
+                } else {
+                    else_body
+                };
                 self.eval_sequence(branch)?
             }
             NodeKind::WhileStmt { condition, body } => {
@@ -455,14 +461,21 @@ impl Environment {
                 }
                 nil
             }
-            NodeKind::ForStmt { target, iterator, body } => {
+            NodeKind::ForStmt {
+                target,
+                iterator,
+                body,
+            } => {
                 let loc = iterator.loc();
                 let live_iterator = self.eval(*iterator)?.get(self);
                 if live_iterator.class != builtin::Array {
                     return Err(Error {
                         loc,
                         kind: TypeError,
-                        msg: format!("for..in expected Array type, got {}", live_iterator.class.get(self).name),
+                        msg: format!(
+                            "for..in expected Array type, got {}",
+                            live_iterator.class.get(self).name
+                        ),
                     });
                 }
                 let Underlying::Vec(elements) = live_iterator.underlying.clone() else {
@@ -488,12 +501,7 @@ impl Environment {
                 let lhs = self.eval(*lhs)?;
                 let rhs = self.eval(*rhs)?;
                 let method_name = operator_method_name(operator);
-                self.call_method(
-                    lhs,
-                    method_name,
-                    &[rhs],
-                    loc,
-                )?
+                self.call_method(lhs, method_name, &[rhs], loc)?
             }
             NodeKind::Access { path } => self.eval_access(path)?,
             NodeKind::Call { target, args } => {
@@ -501,21 +509,18 @@ impl Environment {
                     .into_iter()
                     .map(|node| self.eval(node))
                     .collect::<Result<Vec<_>, _>>()?;
-                self.call_method(
-                    self.current_self,
-                    &target,
-                    &args,
-                    loc,
-                )?
+                self.call_method(self.current_self, &target, &args, loc)?
             }
-            NodeKind::Ident { name } =>
-                self.retrieve(&name, loc)?,
-            NodeKind::StringLiteral { value } =>
-                self.create_instance_with_value(builtin::String, Underlying::String(value)),
-            NodeKind::NumberLiteral { value } =>
-                self.create_instance_with_value(builtin::Number, F64(value)),
-            NodeKind::BooleanLiteral { value } =>
-                self.create_instance_with_value(builtin::Bool, Underlying::Bool(value)),
+            NodeKind::Ident { name } => self.retrieve(&name, loc)?,
+            NodeKind::StringLiteral { value } => {
+                self.create_instance_with_value(builtin::String, Underlying::String(value))
+            }
+            NodeKind::NumberLiteral { value } => {
+                self.create_instance_with_value(builtin::Number, F64(value))
+            }
+            NodeKind::BooleanLiteral { value } => {
+                self.create_instance_with_value(builtin::Bool, Underlying::Bool(value))
+            }
             NodeKind::ArrayLiteral { elements } => {
                 let array = elements
                     .into_iter()
@@ -532,14 +537,14 @@ impl Environment {
                 self.create_instance_with_value(builtin::Dict, Underlying::HashMap(dict))
             }
 
-            NodeKind::NilLiteral =>
-                nil,
-            NodeKind::Return { .. } =>
+            NodeKind::NilLiteral => nil,
+            NodeKind::Return { .. } => {
                 return Err(Error {
                     kind: SyntaxError,
                     msg: "'return' outside of function".to_string(),
                     loc,
-                }),
+                });
+            }
         };
         Ok(result)
     }
@@ -551,47 +556,48 @@ impl Environment {
         for component in components {
             let loc = component.loc();
             result = match component.kind {
-                NodeKind::Ident { name } =>
-                    result.get(self).get_property(&name, loc)?,
+                NodeKind::Ident { name } => result.get(self).get_property(&name, loc)?,
                 NodeKind::Call { target, args } => {
                     let args = args
                         .into_iter()
                         .map(|node| self.eval(node))
                         .collect::<Result<Vec<_>, _>>()?;
-                    self.call_method(
-                        result,
-                        &target,
-                        &args,
-                        loc,
-                    )?
+                    self.call_method(result, &target, &args, loc)?
                 }
-                _ => return Err(Error {
-                    loc,
-                    kind: SyntaxError,
-                    msg: format!("illegal access path part: {component:?}"),
-                })
+                _ => {
+                    return Err(Error {
+                        loc,
+                        kind: SyntaxError,
+                        msg: format!("illegal access path part: {component:?}"),
+                    });
+                }
             }
         }
         Ok(result)
     }
 
-    pub fn call_method(&mut self,
-                       receiver: ObjectId,
-                       method_name: &str,
-                       args: &[ObjectId],
-                       loc: String) -> Result<ObjectId, Error> {
+    pub fn call_method(
+        &mut self,
+        receiver: ObjectId,
+        method_name: &str,
+        args: &[ObjectId],
+        loc: String,
+    ) -> Result<ObjectId, Error> {
         let class = receiver.class(self);
-        let method = class.methods
+        let method = class
+            .methods
             .get(method_name)
             .ok_or(Error {
                 kind: MethodNotFound,
-                msg: format!("could not find method '{method_name}' on class '{}'", class.name),
+                msg: format!(
+                    "could not find method '{method_name}' on class '{}'",
+                    class.name
+                ),
                 loc,
             })?
             .clone();
         let result = match method.body {
-            MethodBody::Builtin(function) =>
-                function(self, receiver, method_name, args),
+            MethodBody::Builtin(function) => function(self, receiver, method_name, args),
 
             MethodBody::User(body) => {
                 self.push_scope();
